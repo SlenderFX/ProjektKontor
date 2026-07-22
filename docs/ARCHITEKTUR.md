@@ -32,6 +32,8 @@ Teambeitrag. Der Gesamtstand ergibt sich aus den Teambeiträgen.
 ## Berechtigungsgrenzen
 
 - Geschäftsführung: globaler Zugriff und globale Verwaltung
+- Klassenleitung: Verwaltung der durch die Geschäftsführung freigeschalteten
+  Klassen, Schülerzugänge und zugehörigen Projekte
 - Gesamtprojektleitung: Vollzugriff innerhalb des jeweiligen Projekts
 - Teamleitung: Teamorganisation, Aufgabenanlage und Teamprüfung
 - Teammitglied: eigene Teamaufgaben, Ergebnisse, Status, Kommentare, Uploads
@@ -46,7 +48,10 @@ Serververwaltung.
 
 ## Zugangsdaten
 
-Das Lehrkraftkennwort wird nicht auslesbar als Scrypt-Hash gespeichert.
+Lehrkraftkonten werden ausschließlich durch die Geschäftsführung angelegt und
+freigeschaltet. Das erzeugte Initialkennwort wird nur unmittelbar nach Anlage
+oder Zurücksetzung angezeigt. Lehrkraftkennwörter werden nicht auslesbar als
+Scrypt-Hash gespeichert.
 Schüler-Zugangscodes werden aufgrund der bewussten Produktentscheidung
 verschlüsselt und sind für die Geschäftsführung auslesbar. Der Schlüssel liegt
 außerhalb der Datenbank in `PK_SECRET_KEY` beziehungsweise der lokalen

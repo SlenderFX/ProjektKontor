@@ -20,6 +20,7 @@
         <label>Benutzername<input name="username" autocomplete="username" placeholder="z. B. vorname01" required></label>
         <label>Kennwort oder Zugangscode<input name="password" type="password" autocomplete="current-password" required></label>
         <button class="button primary" type="submit">Anmelden</button>
+        <button class="text-button auth-switch hidden" id="show-setup" type="button">Erstmalige Geschäftsführung einrichten</button>
       </form>
       <form id="setup-form" class="stack hidden">
         <div class="info-box">Richten Sie einmalig das Konto der Geschäftsführung ein.</div>
@@ -27,6 +28,7 @@
         <label>Benutzername<input name="username" value="lehrkraft" required></label>
         <label>Kennwort<input name="password" type="password" minlength="10" required></label>
         <button class="button primary" type="submit">ProjektKontor einrichten</button>
+        <button class="text-button auth-switch" id="show-login" type="button">Zum Login für Lehrkräfte und Lernende</button>
       </form>
       <div class="auth-legal"><button type="button" class="text-button privacy-link">Datenschutzinformation</button><a class="text-button" href="/impressum">Impressum</a></div>
     </section>

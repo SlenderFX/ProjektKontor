@@ -19,8 +19,10 @@ pip install -r requirements.txt
 python -m projektkontor
 ```
 
-Anschließend `http://127.0.0.1:8080` öffnen. Beim ersten Aufruf wird das
-Lehrkraftkonto eingerichtet.
+Anschließend `http://127.0.0.1:8080` öffnen. Nur bei einer leeren Installation
+wird einmalig das Konto der Geschäftsführung eingerichtet. Danach bleibt die
+gemeinsame Anmeldung für Lehrkräfte und Lernende sichtbar. Weitere Lehrkräfte
+werden von der Geschäftsführung angelegt, freigeschaltet und Klassen zugeordnet.
 
 Für einen schnellen Test ohne Installation kann der von Codex bereitgestellte
 Python verwendet werden, sofern die Abhängigkeiten dort vorhanden sind.
@@ -62,7 +64,9 @@ Weitere Dokumente:
 
 ## Sicherheitsmodell
 
-- Das Lehrkraftkennwort wird ausschließlich als Scrypt-Hash gespeichert.
+- Lehrkraftkennwörter werden ausschließlich als Scrypt-Hash gespeichert.
+- Die Geschäftsführung verwaltet Lehrkraftkonten und Klassenfreigaben;
+  Klassenleitungen sehen und bearbeiten nur ihre freigeschalteten Klassen.
 - Schüler-Zugangscodes sind wie vereinbart durch die Lehrkraft auslesbar und
   werden deshalb verschlüsselt gespeichert.
 - Schüler-Zugangscodes dürfen nicht für andere Dienste wiederverwendet werden.

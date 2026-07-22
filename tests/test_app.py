@@ -733,6 +733,79 @@ class AppFlowTest(unittest.TestCase):
         status, _, _ = student.request("POST", f"/api/tasks/{secret_task['ids'][0]}/comments", {"body": "Unzulässiger Zugriff"})
         self.assertEqual(status, 403)
 
+    def test_existing_accounts_keep_login_available(self):
+        self.client.request("POST", "/api/setup", {
+            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
+        })
+        _, klass, _ = self.client.request("POST", "/api/classes", {"name": "LOGIN24"})
+        _, student, _ = self.client.request("POST", f"/api/classes/{klass['id']}/users", {"first_name": "Lena"})
+        self.client.request("POST", "/api/logout", {})
+
+        status, bootstrap, _ = self.client.request("GET", "/api/bootstrap")
+        self.assertEqual(status, 200)
+        self.assertTrue(bootstrap["configured"])
+        self.assertTrue(bootstrap["has_accounts"])
+        self.assertFalse(bootstrap["setup_available"])
+        self.assertIsNone(bootstrap["user"])
+
+        status, logged_in, _ = self.client.request("POST", "/api/login", {
+            "username": student["username"], "password": student["access_code"]
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(logged_in["ok"])
+
+        status, index, _ = self.client.request("GET", "/app")
+        self.assertEqual(status, 200)
+        self.assertIn(b"show-login", index)
+        self.assertIn(b"show-setup", index)
+        status, script, _ = self.client.request("GET", "/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Mit Lehrkraftkonto oder Sch\xc3\xbclerzugang anmelden", script)
+
+    def test_owner_assigns_teacher_to_classes_and_scope_is_enforced(self):
+        self.client.request("POST", "/api/setup", {
+            "first_name": "Jeroen", "username": "geschaeftsfuehrung", "password": "sicheres-testkennwort"
+        })
+        _, class_a, _ = self.client.request("POST", "/api/classes", {"name": "KL24A"})
+        _, class_b, _ = self.client.request("POST", "/api/classes", {"name": "KL24B"})
+        status, teacher, _ = self.client.request("POST", "/api/teachers", {
+            "first_name": "Frau Meyer", "username": "meyer", "class_ids": [class_a["id"]]
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(teacher["initial_password"])
+
+        teacher_client = Client(self.app)
+        status, _, _ = teacher_client.request("POST", "/api/login", {
+            "username": "meyer", "password": teacher["initial_password"]
+        })
+        self.assertEqual(status, 200)
+        _, bootstrap, _ = teacher_client.request("GET", "/api/bootstrap")
+        self.assertEqual(bootstrap["user"]["is_owner"], 0)
+
+        status, classes, _ = teacher_client.request("GET", "/api/classes")
+        self.assertEqual(status, 200)
+        self.assertEqual([item["id"] for item in classes], [class_a["id"]])
+        status, _, _ = teacher_client.request("POST", f"/api/classes/{class_a['id']}/users", {"first_name": "Lena"})
+        self.assertEqual(status, 200)
+        status, _, _ = teacher_client.request("POST", f"/api/classes/{class_b['id']}/users", {"first_name": "Noah"})
+        self.assertEqual(status, 403)
+        status, _, _ = teacher_client.request("POST", "/api/classes", {"name": "KL24C"})
+        self.assertEqual(status, 403)
+        status, _, _ = teacher_client.request("GET", "/api/teachers")
+        self.assertEqual(status, 403)
+
+        status, teachers, _ = self.client.request("GET", "/api/teachers")
+        self.assertEqual(status, 200)
+        meyer = next(item for item in teachers if item["username"] == "meyer")
+        self.assertEqual([item["id"] for item in meyer["classes"]], [class_a["id"]])
+        status, _, _ = self.client.request("PATCH", f"/api/teachers/{meyer['id']}", {
+            "first_name": "Frau Meyer", "username": "meyer", "active": True,
+            "class_ids": [class_b["id"]],
+        })
+        self.assertEqual(status, 200)
+        _, reassigned, _ = teacher_client.request("GET", "/api/classes")
+        self.assertEqual([item["id"] for item in reassigned], [class_b["id"]])
+
 
 if __name__ == "__main__":
     unittest.main()

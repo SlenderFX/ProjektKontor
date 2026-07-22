@@ -41,9 +41,17 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT NOT NULL UNIQUE COLLATE NOCASE,
     credential TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('teacher','student')),
+    is_owner INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     last_login_at TEXT,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS teacher_classes (
+    teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+    assigned_at TEXT NOT NULL,
+    PRIMARY KEY(teacher_id, class_id)
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -283,6 +291,7 @@ CREATE INDEX IF NOT EXISTS idx_login_attempts ON login_attempts(username,remote_
 CREATE INDEX IF NOT EXISTS idx_contact_attempts ON contact_attempts(remote_addr,attempted_at);
 CREATE INDEX IF NOT EXISTS idx_pending_logins_user ON pending_logins(user_id,expires_at);
 CREATE INDEX IF NOT EXISTS idx_deadline_requests_task ON deadline_requests(task_id,status);
+CREATE INDEX IF NOT EXISTS idx_teacher_classes_class ON teacher_classes(class_id,teacher_id);
 """
 
 
@@ -314,6 +323,17 @@ class Database:
                 connection.execute("ALTER TABLE projects ADD COLUMN end_has_time INTEGER NOT NULL DEFAULT 1")
             if "allow_student_organization" not in columns:
                 connection.execute("ALTER TABLE projects ADD COLUMN allow_student_organization INTEGER NOT NULL DEFAULT 0")
+            user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+            if "is_owner" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN is_owner INTEGER NOT NULL DEFAULT 0")
+            # Bestandsschutz: Bei älteren Installationen wird die zuerst
+            # angelegte aktive Lehrkraft automatisch zur Geschäftsführung.
+            if not connection.execute("SELECT 1 FROM users WHERE role='teacher' AND is_owner=1 LIMIT 1").fetchone():
+                first_teacher = connection.execute(
+                    "SELECT id FROM users WHERE role='teacher' AND active=1 ORDER BY id LIMIT 1"
+                ).fetchone()
+                if first_teacher:
+                    connection.execute("UPDATE users SET is_owner=1 WHERE id=?", (first_teacher[0],))
             project_rows = connection.execute("SELECT DISTINCT project_id FROM teams WHERE status!='rejected'").fetchall()
             for project_row in project_rows:
                 used: set[str] = set()
