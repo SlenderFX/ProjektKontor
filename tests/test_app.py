@@ -788,6 +788,13 @@ class AppFlowTest(unittest.TestCase):
             "login_type": "admin", "username": "verwaltung", "password": "sicheres-testkennwort"
         })
         self.assertEqual(status, 200)
+        status, index, _ = admin_client.request("GET", "/app")
+        self.assertEqual(status, 200)
+        self.assertIn(b'class="workspace-nav"', index)
+        status, script, _ = admin_client.request("GET", "/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"state.user?.is_owner&&state.route!=='admin'", script)
+        self.assertIn(b"$('.brand').href='#/admin/teachers'", script)
         _, admin_bootstrap, _ = admin_client.request("GET", "/api/bootstrap")
         self.assertEqual(admin_bootstrap["user"]["is_owner"], 1)
 

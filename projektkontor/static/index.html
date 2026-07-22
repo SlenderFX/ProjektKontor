@@ -48,10 +48,10 @@
         <span>ProjektKontor</span>
       </a>
       <nav id="nav">
-        <a href="#/" data-route="home"><span>⌂</span>Start</a>
-        <a href="#/tasks" data-route="tasks"><span>✓</span>Meine Aufgaben</a>
-        <a href="#/projects" data-route="projects"><span>▦</span>Projekte</a>
-        <a href="#/notifications" data-route="notifications"><span>●</span>Hinweise <b id="notification-count" class="badge hidden">0</b></a>
+        <a href="#/" data-route="home" class="workspace-nav"><span>⌂</span>Start</a>
+        <a href="#/tasks" data-route="tasks" class="workspace-nav"><span>✓</span>Meine Aufgaben</a>
+        <a href="#/projects" data-route="projects" class="workspace-nav"><span>▦</span>Projekte</a>
+        <a href="#/notifications" data-route="notifications" class="workspace-nav"><span>●</span>Hinweise <b id="notification-count" class="badge hidden">0</b></a>
         <a href="#/admin" data-route="admin" class="teacher-only"><span>⚙</span>Verwaltung</a>
       </nav>
       <div class="sidebar-footer">
@@ -63,7 +63,7 @@
       <header class="topbar">
         <button id="menu-toggle" class="icon-button" aria-label="Menü öffnen">☰</button>
         <div id="breadcrumbs"></div>
-        <button id="quick-notifications" class="icon-button" aria-label="Hinweise">●</button>
+        <button id="quick-notifications" class="icon-button workspace-nav" aria-label="Hinweise">●</button>
       </header>
       <main id="content" class="content" tabindex="-1"></main>
     </section>

@@ -51,6 +51,10 @@ async function boot(){
   $('#current-name').textContent=data.user.first_name;$('#current-role').textContent=data.user.role==='teacher'?(data.user.is_owner?'Admin':'Lehrkraft'):'Projektmitglied';
   if(data.user.role!=='teacher')$$('.teacher-only').forEach(x=>x.classList.add('hidden'));
   if(!data.user.is_owner)$$('.owner-only').forEach(x=>x.classList.add('hidden'));
+  if(data.user.is_owner){
+    $$('.workspace-nav').forEach(x=>x.classList.add('hidden'));
+    $('.brand').href='#/admin/teachers';
+  }
   updateNotificationCount(data.unread_notifications||0); window.addEventListener('hashchange',route); route();
 }
 function showLogin(){$('#login-form').classList.remove('hidden');$('#setup-form').classList.add('hidden');$('#login-heading').textContent='ProjektKontor';$('#auth-intro').textContent='Wählen Sie Ihren Zugang und melden Sie sich mit den zugeteilten Daten an.';updateLoginType()}
@@ -97,6 +101,10 @@ $('#dialog-actions').addEventListener('click',event=>{
 
 async function route(){
   $('.sidebar').classList.remove('open');const parts=location.hash.replace(/^#\/?/,'').split('/').filter(Boolean);state.route=parts[0]||'home';
+  if(state.user?.is_owner&&state.route!=='admin'){
+    if(location.hash!=='#/admin/teachers')location.hash='#/admin/teachers';
+    return;
+  }
   $$('#nav a').forEach(a=>a.classList.toggle('active',a.dataset.route===state.route));$('#content').innerHTML='<div class="empty">Wird geladen …</div>';
   try{
     if(state.route==='home') await renderHome();
