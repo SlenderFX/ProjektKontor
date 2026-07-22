@@ -20,10 +20,11 @@ python -m projektkontor
 ```
 
 Anschließend `http://127.0.0.1:8080` öffnen. Die Anmeldung unterscheidet klar
-zwischen Schüler, Lehrkraft und Admin. Nur bei einer leeren Installation wird
-einmalig das Administrationskonto eingerichtet. Schüler- und Lehrkraftkonten
-können sich nicht selbst registrieren: Der Admin legt Lehrkräfte an und schaltet
-ihnen Klassen frei; Schülerzugänge entstehen ausschließlich in der Verwaltung.
+zwischen Schüler, Lehrkraft und Admin. Das bestehende ursprüngliche
+Lehrkraftkonto bleibt ein Lehrkraftkonto. Zusätzlich wird einmalig ein
+persönliches Administrationskonto eingerichtet. Eine Selbstregistrierung gibt
+es nicht: Der Admin legt Lehrkraftkonten an; jede Lehrkraft verwaltet danach
+ihre eigenen Klassen und Schülerzugänge.
 
 Für einen schnellen Test ohne Installation kann der von Codex bereitgestellte
 Python verwendet werden, sofern die Abhängigkeiten dort vorhanden sind.
@@ -36,6 +37,7 @@ Python verwendet werden, sofern die Abhängigkeiten dort vorhanden sind.
 | `PK_PORT` | `8080` | Port |
 | `PK_DATA_DIR` | `./data` | Datenbank, Uploads und Berichte |
 | `PK_SECRET_KEY` | automatisch lokal erzeugt | Sitzungen und Zugangscode-Verschlüsselung |
+| `PK_ADMIN_SETUP_TOKEN` | lokal optional, auf dem Server erforderlich | Einmaliger privater Code, der die Einrichtung des ersten Administrationskontos schützt |
 | `PK_MAX_UPLOAD_MB` | `25` | Maximale Dateigröße |
 | `PK_COOKIE_SECURE` | `0` lokal, auf Server `1` | Sitzungscookie nur über HTTPS |
 | `PK_TRUST_PROXY` | `0` lokal, in Docker `1` | Weitergeleitete Clientadresse ausschließlich hinter einem vertrauenswürdigen Reverse Proxy auswerten |
@@ -67,8 +69,15 @@ Weitere Dokumente:
 ## Sicherheitsmodell
 
 - Lehrkraftkennwörter werden ausschließlich als Scrypt-Hash gespeichert.
-- Die Geschäftsführung verwaltet Lehrkraftkonten und Klassenfreigaben;
-  Klassenleitungen sehen und bearbeiten nur ihre freigeschalteten Klassen.
+- Der Admin verwaltet Lehrkraftkonten, erhält aber keinen pauschalen Zugriff
+  auf deren Klassen, Schüler oder Projekte.
+- Neue Lehrkraft-Benutzernamen beginnen verbindlich mit `lehrkraft_`. Ein
+  erzeugtes Initialkennwort muss bei der ersten Anmeldung durch ein privates
+  Kennwort ersetzt werden; anschließend kann der Admin es nicht zurücksetzen.
+- Eine Lehrkraft kann mit Telefonnummer und Anliegen Hilfe anfordern. Erst ein
+  von ihr telefonisch übermittelter Unterstützungscode öffnet dem Admin einen
+  auf zwei Stunden begrenzten Zugriff auf ihre Unterrichtsdaten. Die Lehrkraft
+  kann diesen Zugriff jederzeit sofort widerrufen.
 - Schüler-Zugangscodes sind wie vereinbart durch die Lehrkraft auslesbar und
   werden deshalb verschlüsselt gespeichert.
 - Schüler-Zugangscodes dürfen nicht für andere Dienste wiederverwendet werden.

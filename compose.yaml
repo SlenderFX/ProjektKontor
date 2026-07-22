@@ -24,6 +24,7 @@ services:
       PK_SMTP_USE_SSL: ${PK_SMTP_USE_SSL:-1}
       PK_TURNSTILE_SITEKEY: ${PK_TURNSTILE_SITEKEY:?Turnstile-Sitekey in .env festlegen}
       PK_TURNSTILE_SECRET: ${PK_TURNSTILE_SECRET:?Turnstile-Secret in .env festlegen}
+      PK_ADMIN_SETUP_TOKEN: ${PK_ADMIN_SETUP_TOKEN:?Einmaligen Admin-Einrichtungscode in .env festlegen}
     volumes:
       - projektkontor_data:/data
     expose:

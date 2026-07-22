@@ -1,6 +1,6 @@
 # Sicherheitsprüfung ProjektKontor
 
-Stand: 16. Juli 2026
+Stand: 22. Juli 2026
 
 ## Umgesetzte Schutzmaßnahmen
 
@@ -12,6 +12,13 @@ Stand: 16. Juli 2026
 - Begrenzung fehlgeschlagener Anmeldungen nach Konto und Clientadresse,
 - verstärkte Scrypt-Ableitung für das Lehrkraftkennwort; bestehende Hashes
   werden nach erfolgreicher Anmeldung automatisch aktualisiert,
+- getrennte Schüler-, Lehrkraft- und Adminanmeldung sowie ein durch einen
+  privaten Einrichtungscode geschütztes einmaliges Admin-Setup,
+- verpflichtender Wechsel des vom Admin erzeugten Lehrkraft-Initialkennworts;
+  nach der ersten Anmeldung ist kein Admin-Reset mehr möglich,
+- kein pauschaler Adminzugriff auf Unterrichtsdaten: Supportfreigaben benötigen
+  einen gehasht gespeicherten, 24 Stunden gültigen Code, laufen nach zwei
+  Stunden ab und können von der Lehrkraft sofort widerrufen werden,
 - verschlüsselte Speicherung der vereinbarungsgemäß auslesbaren
   Schüler-Zugangscodes,
 - Upload-Allowlist, Größenbegrenzung, zufällige Speichernamen, Signaturprüfung,

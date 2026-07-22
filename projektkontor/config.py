@@ -49,6 +49,7 @@ class Config:
     smtp_use_ssl: bool = True
     turnstile_sitekey: str = ""
     turnstile_secret: str = ""
+    admin_setup_token: str = ""
 
     @property
     def db_path(self) -> Path:
@@ -94,6 +95,7 @@ def load_config() -> Config:
         smtp_use_ssl=os.getenv("PK_SMTP_USE_SSL", "1").lower() in {"1", "true", "yes"},
         turnstile_sitekey=os.getenv("PK_TURNSTILE_SITEKEY", test_sitekey).strip(),
         turnstile_secret=os.getenv("PK_TURNSTILE_SECRET", test_secret).strip(),
+        admin_setup_token=os.getenv("PK_ADMIN_SETUP_TOKEN", "").strip(),
     )
     config.data_dir.mkdir(parents=True, exist_ok=True)
     config.upload_dir.mkdir(parents=True, exist_ok=True)

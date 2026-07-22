@@ -29,10 +29,11 @@
         <button class="text-button auth-switch hidden" id="show-setup" type="button">Admin-Ersteinrichtung</button>
       </form>
       <form id="setup-form" class="stack hidden">
-        <div class="info-box">Richten Sie einmalig das Administrationskonto ein. Lehrkraft- und Schülerkonten werden später ausschließlich durch den Admin angelegt.</div>
+        <div class="info-box">Richten Sie einmalig Ihr persönliches Administrationskonto ein. Danach legt der Admin Lehrkraftkonten an; die Lehrkräfte verwalten ihre Klassen und Schülerzugänge selbst.</div>
         <label>Ihr Vorname<input name="first_name" required></label>
         <label>Admin-Benutzername<input name="username" value="admin" required></label>
         <label>Kennwort<input name="password" type="password" minlength="10" required></label>
+        <label id="setup-token-field" class="hidden">Admin-Einrichtungscode<input name="setup_token" type="password" autocomplete="off"><small>Dieser einmalige Code wird ausschließlich in der privaten Serverkonfiguration hinterlegt.</small></label>
         <button class="button primary" type="submit">Admin einrichten</button>
         <button class="text-button auth-switch" id="show-login" type="button">Zurück zum Login</button>
       </form>

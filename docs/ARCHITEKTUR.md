@@ -32,32 +32,45 @@ Teambeitrag. Der Gesamtstand ergibt sich aus den Teambeiträgen.
 
 ## Berechtigungsgrenzen
 
-- Admin/Geschäftsführung: globaler Zugriff und globale Verwaltung
-- Klassenleitung: Verwaltung der durch die Geschäftsführung freigeschalteten
-  Klassen, Schülerzugänge und zugehörigen Projekte
+- Admin: Verwaltung der erworbenen Lehrkraftzugänge; kein dauerhafter globaler
+  Zugriff auf Klassen-, Schüler- oder Projektdaten
+- Lehrkraft: selbstständige Verwaltung der eigenen Klassen, Schülerzugänge und
+  zugehörigen Projekte
+- Supportzugriff: nur nach Einlösung eines von der Lehrkraft erzeugten Codes,
+  höchstens zwei Stunden und jederzeit durch die Lehrkraft widerrufbar
 - Gesamtprojektleitung: Vollzugriff innerhalb des jeweiligen Projekts
 - Teamleitung: Teamorganisation, Aufgabenanlage und Teamprüfung
 - Teammitglied: eigene Teamaufgaben, Ergebnisse, Status, Kommentare, Uploads
 
-Die Geschäftsführung kann die selbstständige Schülerorganisation pro Projekt
+Die Lehrkraft kann die selbstständige Schülerorganisation pro Projekt
 aktivieren. Schülerseitig angelegte Teams bleiben bis zur Freigabe durch eine
 Hauptrolle im Status „vorgeschlagen“. Fristverlängerungen ändern die Aufgabe
-erst nach einer Entscheidung der Gesamtprojektleitung oder Geschäftsführung.
+erst nach einer Entscheidung der Gesamtprojektleitung oder Lehrkraft.
 
 Eine lernende Gesamtprojektleitung erhält keine Klassen-, Konto-, Backup- oder
 Serververwaltung.
 
 ## Zugangsdaten
 
-Die Anmeldung trennt Schüler-, Lehrkraft- und Adminzugänge. Das technische
-Administrationskonto übernimmt innerhalb der Unterrichtssimulation zugleich
-die Rolle der Geschäftsführung. Lehrkraftkonten werden ausschließlich durch
-den Admin angelegt und
-freigeschaltet. Das erzeugte Initialkennwort wird nur unmittelbar nach Anlage
-oder Zurücksetzung angezeigt. Lehrkraftkennwörter werden nicht auslesbar als
+Die Anmeldung trennt Schüler-, Lehrkraft- und Adminzugänge. Das persönliche
+Administrationskonto dient ausschließlich der Verwaltung von Lehrkraftzugängen
+und wird bei einer neuen Installation durch `PK_ADMIN_SETUP_TOKEN` geschützt
+eingerichtet. Neue Lehrkraft-Benutzernamen beginnen mit `lehrkraft_`.
+Lehrkraftkonten werden ausschließlich durch den Admin angelegt. Das erzeugte
+Initialkennwort wird nur unmittelbar nach Anlage angezeigt und muss bei der
+ersten Anmeldung durch ein persönliches Kennwort ersetzt werden. Danach kann
+es der Admin nicht zurücksetzen. Lehrkraftkennwörter werden ausschließlich als
 Scrypt-Hash gespeichert.
+
+Fordert eine Lehrkraft Hilfe an, werden Telefonnummer und Problembeschreibung
+an den privaten Supportkontakt übermittelt. Ein achtstelliger, nur gehasht
+gespeicherter Unterstützungscode ist 24 Stunden einlösbar. Erst seine Eingabe
+durch den Admin gewährt für höchstens zwei Stunden Zugriff auf die Klassen der
+betreffenden Lehrkraft. Die Lehrkraft kann die Freigabe sofort widerrufen.
+
 Schüler-Zugangscodes werden aufgrund der bewussten Produktentscheidung
-verschlüsselt und sind für die Geschäftsführung auslesbar. Der Schlüssel liegt
+verschlüsselt und sind nur für die zuständige Lehrkraft sowie während eines
+aktiven Supportzugriffs für den Admin auslesbar. Der Schlüssel liegt
 außerhalb der Datenbank in `PK_SECRET_KEY` beziehungsweise der lokalen
 Schlüsseldatei.
 

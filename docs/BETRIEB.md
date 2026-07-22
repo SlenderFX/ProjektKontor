@@ -11,7 +11,7 @@ Erneuerung des TLS-Zertifikats.
 
 ```bash
 cp .env.example .env
-# Domain, Backup-Pfad und langen Zufallswert eintragen
+# Domain, Backup-Pfad, Geheimschlüssel und Admin-Einrichtungscode eintragen
 docker compose up -d --build
 ```
 
@@ -20,6 +20,12 @@ Sie muss ausschließlich für den Serverbenutzer lesbar sein (`chmod 600 .env`)
 und getrennt vom normalen ProjektKontor-Backup sicher verwahrt werden. Ohne
 diesen Schlüssel können die Zugangscodes nach einer Wiederherstellung nicht
 mehr ausgelesen werden.
+
+`PK_ADMIN_SETUP_TOKEN` schützt ausschließlich die einmalige Anlage des ersten
+Administrationskontos. Verwenden Sie dafür einen langen Zufallswert, bewahren
+Sie ihn privat auf und geben Sie ihn nur in der Admin-Ersteinrichtung ein. Das
+eigentliche Admin-Kennwort wird dabei von Ihnen festgelegt und niemals im
+Quellcode hinterlegt. Das bisherige Lehrkraftkonto bleibt davon unberührt.
 
 Vor der produktiven Freigabe müssen in `.env` außerdem Name, Anschrift und
 Kontakt des datenschutzrechtlich Verantwortlichen, der Kontakt zur

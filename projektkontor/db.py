@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS users (
     credential TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('teacher','student')),
     is_owner INTEGER NOT NULL DEFAULT 0,
+    must_change_password INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     last_login_at TEXT,
     created_at TEXT NOT NULL
@@ -282,6 +283,20 @@ CREATE TABLE IF NOT EXISTS pending_logins (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS support_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    code_hash TEXT NOT NULL UNIQUE,
+    phone TEXT NOT NULL,
+    message TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','active','revoked','expired')),
+    code_expires_at TEXT NOT NULL,
+    granted_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    granted_at TEXT,
+    access_expires_at TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_team ON tasks(team_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(project_id, status_key);
@@ -292,6 +307,7 @@ CREATE INDEX IF NOT EXISTS idx_contact_attempts ON contact_attempts(remote_addr,
 CREATE INDEX IF NOT EXISTS idx_pending_logins_user ON pending_logins(user_id,expires_at);
 CREATE INDEX IF NOT EXISTS idx_deadline_requests_task ON deadline_requests(task_id,status);
 CREATE INDEX IF NOT EXISTS idx_teacher_classes_class ON teacher_classes(class_id,teacher_id);
+CREATE INDEX IF NOT EXISTS idx_support_requests_teacher ON support_requests(teacher_id,status,access_expires_at);
 """
 
 
@@ -326,14 +342,17 @@ class Database:
             user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
             if "is_owner" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN is_owner INTEGER NOT NULL DEFAULT 0")
-            # Bestandsschutz: Bei älteren Installationen wird die zuerst
-            # angelegte aktive Lehrkraft automatisch zur Geschäftsführung.
-            if not connection.execute("SELECT 1 FROM users WHERE role='teacher' AND is_owner=1 LIMIT 1").fetchone():
-                first_teacher = connection.execute(
-                    "SELECT id FROM users WHERE role='teacher' AND active=1 ORDER BY id LIMIT 1"
-                ).fetchone()
-                if first_teacher:
-                    connection.execute("UPDATE users SET is_owner=1 WHERE id=?", (first_teacher[0],))
+            if "must_change_password" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+            # Seit Version 2 sind Plattform-Admin und Lehrkraft getrennte
+            # Konten. Frühere globale Lehrkraftkonten bleiben Lehrkraftkonten;
+            # anschließend kann einmalig ein eigener Admin eingerichtet werden.
+            if not connection.execute("SELECT 1 FROM schema_migrations WHERE version=2").fetchone():
+                connection.execute("UPDATE users SET is_owner=0 WHERE role='teacher'")
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,applied_at) VALUES(2,?)",
+                    (utcnow(),),
+                )
             project_rows = connection.execute("SELECT DISTINCT project_id FROM teams WHERE status!='rejected'").fetchall()
             for project_row in project_rows:
                 used: set[str] = set()

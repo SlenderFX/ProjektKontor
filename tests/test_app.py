@@ -16,6 +16,8 @@ from projektkontor.backup import create_backup
 from projektkontor.config import Config
 from projektkontor.server import App
 
+TEST_TEACHER_PASSWORD = "persoenliches-testkennwort"
+
 
 class Client:
     def __init__(self, app: App, auto_privacy: bool = True):
@@ -48,6 +50,11 @@ class Client:
         data = json.loads(payload) if captured["headers"].get("Content-Type", "").startswith("application/json") else payload
         if isinstance(data, dict) and data.get("csrf"):
             self.csrf = data["csrf"]
+        if self.auto_privacy and isinstance(data, dict) and data.get("password_change_required"):
+            return self.request("POST", "/api/initial-password", {
+                "password_change_token": data["password_change_token"],
+                "new_password": TEST_TEACHER_PASSWORD,
+            })
         if self.auto_privacy and isinstance(data, dict) and data.get("privacy_required"):
             return self.request("POST", "/api/privacy/accept", {
                 "privacy_token": data["privacy_token"], "privacy_version": data["privacy_version"]
@@ -67,11 +74,25 @@ class AppFlowTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_teacher_class_students_project_and_task(self):
-        status, setup, _ = self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
+    def setup_teacher(self, client=None, username="lehrkraft_test"):
+        client = client or self.client
+        status, _, _ = client.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
         })
         self.assertEqual(status, 200)
+        status, teacher, _ = client.request("POST", "/api/teachers", {
+            "first_name": "Jeroen", "username": username
+        })
+        self.assertEqual(status, 200)
+        client.request("POST", "/api/logout", {})
+        status, _, _ = client.request("POST", "/api/login", {
+            "login_type": "teacher", "username": username, "password": teacher["initial_password"]
+        })
+        self.assertEqual(status, 200)
+        return teacher
+
+    def test_teacher_class_students_project_and_task(self):
+        self.setup_teacher()
 
         status, klass, _ = self.client.request("POST", "/api/classes", {"name": "GH24"})
         self.assertEqual(status, 200)
@@ -188,18 +209,14 @@ class AppFlowTest(unittest.TestCase):
         self.assertIsNotNone(self.app.db.one("SELECT id FROM reports WHERE project_id=?", (project_id,)))
 
     def test_student_codes_are_readable_to_teacher(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher()
         _, klass, _ = self.client.request("POST", "/api/classes", {"name": "KB25"})
         _, imported, _ = self.client.request("POST", f"/api/classes/{klass['id']}/import", {"rows": [{"first_name": "Mia"}]})
         _, users, _ = self.client.request("GET", f"/api/classes/{klass['id']}/users")
         self.assertEqual(users[0]["access_code"], imported["created"][0]["access_code"])
 
     def test_teacher_can_create_student_account_manually(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher()
         _, klass, _ = self.client.request("POST", "/api/classes", {"name": "KB26"})
         status, first, _ = self.client.request("POST", f"/api/classes/{klass['id']}/users", {"first_name": "Lena"})
         self.assertEqual(status, 200)
@@ -230,9 +247,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(first["id"], [account["id"] for account in target_users])
 
     def test_student_can_login_with_generated_access_code(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher()
         _, klass, _ = self.client.request("POST", "/api/classes", {"name": "KB29"})
         _, account, _ = self.client.request("POST", f"/api/classes/{klass['id']}/users", {"first_name": "Markus"})
         status, _, _ = self.client.request("POST", "/api/logout", {})
@@ -267,9 +282,7 @@ class AppFlowTest(unittest.TestCase):
 
     def test_student_roles_deadline_requests_and_self_organization(self):
         teacher = self.client
-        teacher.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher(teacher)
         _, klass, _ = teacher.request("POST", "/api/classes", {"name": "WB30"})
         _, imported, _ = teacher.request("POST", f"/api/classes/{klass['id']}/import", {
             "rows": [{"first_name": "Markus"}, {"first_name": "Lena"}]
@@ -348,9 +361,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 403)
 
     def test_excel_duplicate_rows_require_confirmation(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher()
         _, klass, _ = self.client.request("POST", "/api/classes", {"name": "WB31"})
         rows = [{"first_name": "Markus", "duplicate": True}]
         status, result, _ = self.client.request("POST", f"/api/classes/{klass['id']}/import", {"rows": rows})
@@ -363,9 +374,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(len(result["created"]), 1)
 
     def test_excel_import_can_create_and_assign_multiple_classes(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher()
         _, klass, _ = self.client.request("POST", "/api/classes", {"name": "WB31"})
 
         status, template, _ = self.client.request("GET", f"/api/classes/{klass['id']}/template")
@@ -400,9 +409,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(self.app.db.one("SELECT first_name FROM users WHERE class_id=?", (wb32["id"],))["first_name"], "Yusuf")
 
     def test_global_excel_import_works_without_an_existing_class(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher()
         status, template, _ = self.client.request("GET", "/api/users/import-template")
         self.assertEqual(status, 200)
         self.assertEqual([cell.value for cell in load_workbook(io.BytesIO(template)).active[1]], ["Vorname", "Klasse"])
@@ -436,9 +443,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn("Klasse angegeben", preview["rows"][0]["error"])
 
     def test_class_name_validation_explains_empty_values_and_spaces(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher()
         status, result, _ = self.client.request("POST", "/api/classes", {"name": "   "})
         self.assertEqual(status, 400)
         self.assertIn("nicht leer", result["error"])
@@ -465,9 +470,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn("projektkontor/reports/bericht.pdf", names)
 
     def test_project_can_be_created_without_start_and_end(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher()
         _, klass, _ = self.client.request("POST", "/api/classes", {"name": "GH26"})
         _, imported, _ = self.client.request("POST", f"/api/classes/{klass['id']}/import", {"rows": [{"first_name": "Mia"}]})
         lead_id = imported["created"][0]["id"]
@@ -509,9 +512,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(timed_detail["start_has_time"], 1)
 
     def test_date_only_upload_deadline_defaults_to_end_of_day(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher()
         _, klass, _ = self.client.request("POST", "/api/classes", {"name": "GH27"})
         _, imported, _ = self.client.request("POST", f"/api/classes/{klass['id']}/import", {"rows": [{"first_name": "Mia"}]})
         lead_id = imported["created"][0]["id"]
@@ -528,24 +529,17 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(created["due_at"], "2026-10-05T23:59")
 
     def test_teacher_can_update_own_account_securely(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        teacher = self.setup_teacher()
         status, result, _ = self.client.request("PATCH", "/api/account", {"first_name": "Herr Müller"})
         self.assertEqual(status, 200)
         self.assertEqual(result["user"]["first_name"], "Herr Müller")
-        status, _, _ = self.client.request("PATCH", "/api/account", {"username": "geschaeftsfuehrung"})
+        status, _, _ = self.client.request("PATCH", "/api/account", {"username": "lehrkraft_neu"})
         self.assertEqual(status, 403)
         status, result, _ = self.client.request("PATCH", "/api/account", {
-            "username": "geschaeftsfuehrung", "current_password": "sicheres-testkennwort"
+            "username": "lehrkraft_neu", "current_password": TEST_TEACHER_PASSWORD
         })
         self.assertEqual(status, 200)
-        self.assertEqual(result["user"]["username"], "geschaeftsfuehrung")
-        login = Client(self.app)
-        status, _, _ = login.request("POST", "/api/login", {
-            "username": "geschaeftsfuehrung", "password": "sicheres-testkennwort"
-        })
-        self.assertEqual(status, 200)
+        self.assertEqual(result["user"]["username"], "lehrkraft_neu")
 
     def test_security_headers_and_malformed_image_rejection(self):
         status, _, headers = self.client.request("GET", "/api/health")
@@ -694,9 +688,7 @@ class AppFlowTest(unittest.TestCase):
 
     def test_students_cannot_read_other_team_contents(self):
         teacher = self.client
-        teacher.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher(teacher)
         _, bootstrap, _ = teacher.request("GET", "/api/bootstrap")
         teacher_id = bootstrap["user"]["id"]
         _, klass, _ = teacher.request("POST", "/api/classes", {"name": "SI24"})
@@ -734,9 +726,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 403)
 
     def test_existing_accounts_keep_login_available(self):
-        self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
-        })
+        self.setup_teacher()
         _, klass, _ = self.client.request("POST", "/api/classes", {"name": "LOGIN24"})
         _, student, _ = self.client.request("POST", f"/api/classes/{klass['id']}/users", {"first_name": "Lena"})
         self.client.request("POST", "/api/logout", {})
@@ -767,12 +757,21 @@ class AppFlowTest(unittest.TestCase):
         self.client.request("POST", "/api/setup", {
             "first_name": "Jeroen", "username": "verwaltung", "password": "sicheres-testkennwort"
         })
-        _, klass, _ = self.client.request("POST", "/api/classes", {"name": "ROLLEN24"})
-        _, student, _ = self.client.request("POST", f"/api/classes/{klass['id']}/users", {"first_name": "Lena"})
         _, teacher, _ = self.client.request("POST", "/api/teachers", {
-            "first_name": "Frau Meyer", "username": "meyer", "class_ids": [klass["id"]]
+            "first_name": "Frau Meyer", "username": "lehrkraft_meyer"
         })
-        self.client.request("POST", "/api/logout", {})
+        self.assertEqual(self.app.db.one("SELECT must_change_password FROM users WHERE id=?", (teacher["id"],))["must_change_password"], 1)
+        teacher_client = Client(self.app)
+        teacher_client.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "lehrkraft_meyer", "password": teacher["initial_password"]
+        })
+        _, klass, _ = teacher_client.request("POST", "/api/classes", {"name": "ROLLEN24"})
+        _, student, _ = teacher_client.request("POST", f"/api/classes/{klass['id']}/users", {"first_name": "Lena"})
+        self.assertEqual(self.app.db.one("SELECT must_change_password FROM users WHERE id=?", (teacher["id"],))["must_change_password"], 0)
+        status, _, _ = self.client.request("PATCH", f"/api/teachers/{teacher['id']}", {
+            "first_name": "Frau Meyer", "username": "lehrkraft_meyer", "active": True, "reset_password": True
+        })
+        self.assertEqual(status, 403)
 
         wrong_role = Client(self.app)
         status, _, _ = wrong_role.request("POST", "/api/login", {
@@ -792,9 +791,9 @@ class AppFlowTest(unittest.TestCase):
         _, admin_bootstrap, _ = admin_client.request("GET", "/api/bootstrap")
         self.assertEqual(admin_bootstrap["user"]["is_owner"], 1)
 
-        teacher_client = Client(self.app)
-        status, _, _ = teacher_client.request("POST", "/api/login", {
-            "login_type": "teacher", "username": "meyer", "password": teacher["initial_password"]
+        another_teacher_client = Client(self.app)
+        status, _, _ = another_teacher_client.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "lehrkraft_meyer", "password": TEST_TEACHER_PASSWORD
         })
         self.assertEqual(status, 200)
 
@@ -804,49 +803,88 @@ class AppFlowTest(unittest.TestCase):
         })
         self.assertEqual(status, 200)
 
-    def test_owner_assigns_teacher_to_classes_and_scope_is_enforced(self):
+    def test_admin_setup_can_be_protected_by_private_token(self):
+        root = Path(self.temp.name) / "protected-setup"
+        root.mkdir()
+        protected = App(Config(
+            "127.0.0.1", 8080, root, 25 * 1024 * 1024,
+            admin_setup_token="nur-fuer-den-betreiber",
+        ))
+        client = Client(protected)
+        status, bootstrap, _ = client.request("GET", "/api/bootstrap")
+        self.assertEqual(status, 200)
+        self.assertTrue(bootstrap["setup_token_required"])
+        status, _, _ = client.request("POST", "/api/setup", {
+            "first_name": "Jeroen", "username": "admin",
+            "password": "sicheres-admin-kennwort", "setup_token": "falsch",
+        })
+        self.assertEqual(status, 403)
+        status, _, _ = client.request("POST", "/api/setup", {
+            "first_name": "Jeroen", "username": "admin",
+            "password": "sicheres-admin-kennwort",
+            "setup_token": "nur-fuer-den-betreiber",
+        })
+        self.assertEqual(status, 200)
+        account = protected.db.one("SELECT role,is_owner FROM users WHERE username='admin'")
+        self.assertEqual(account, {"role": "teacher", "is_owner": 1})
+
+    def test_legacy_owner_account_becomes_regular_teacher_without_password_change(self):
         self.client.request("POST", "/api/setup", {
-            "first_name": "Jeroen", "username": "geschaeftsfuehrung", "password": "sicheres-testkennwort"
+            "first_name": "Jeroen", "username": "lehrkraft", "password": "sicheres-testkennwort"
         })
-        _, class_a, _ = self.client.request("POST", "/api/classes", {"name": "KL24A"})
-        _, class_b, _ = self.client.request("POST", "/api/classes", {"name": "KL24B"})
-        status, teacher, _ = self.client.request("POST", "/api/teachers", {
-            "first_name": "Frau Meyer", "username": "meyer", "class_ids": [class_a["id"]]
+        self.client.request("POST", "/api/logout", {})
+        self.app.db.execute("DELETE FROM schema_migrations WHERE version=2")
+        self.app.db.initialize()
+        account = self.app.db.one("SELECT username,is_owner FROM users WHERE username='lehrkraft'")
+        self.assertEqual(account["is_owner"], 0)
+        status, _, _ = self.client.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "lehrkraft", "password": "sicheres-testkennwort"
         })
         self.assertEqual(status, 200)
-        self.assertTrue(teacher["initial_password"])
+        _, bootstrap, _ = self.client.request("GET", "/api/bootstrap")
+        self.assertFalse(bootstrap["configured"])
+        self.assertTrue(bootstrap["setup_available"])
 
+    def test_admin_sees_teacher_data_only_with_support_code(self):
+        admin = self.client
+        admin.request("POST", "/api/setup", {
+            "first_name": "Jeroen", "username": "verwaltung", "password": "sicheres-testkennwort"
+        })
+        status, teacher, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Frau Meyer", "username": "lehrkraft_meyer"
+        })
+        self.assertEqual(status, 200)
         teacher_client = Client(self.app)
-        status, _, _ = teacher_client.request("POST", "/api/login", {
-            "username": "meyer", "password": teacher["initial_password"]
+        teacher_client.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "lehrkraft_meyer", "password": teacher["initial_password"]
+        })
+        _, klass, _ = teacher_client.request("POST", "/api/classes", {"name": "KL24A"})
+        _, student, _ = teacher_client.request("POST", f"/api/classes/{klass['id']}/users", {"first_name": "Lena"})
+
+        status, _, _ = admin.request("GET", f"/api/classes/{klass['id']}/users")
+        self.assertEqual(status, 403)
+        _, hidden_classes, _ = admin.request("GET", "/api/classes")
+        self.assertEqual(hidden_classes, [])
+
+        with patch.object(self.app, "_send_support_email") as send:
+            status, support, _ = teacher_client.request("POST", "/api/support/requests", {
+                "phone": "+49 170 1234567", "message": "Ich benötige Hilfe bei einer Schülerzuordnung."
+            })
+        self.assertEqual(status, 200)
+        send.assert_called_once()
+        status, redeemed, _ = admin.request("POST", "/api/support/redeem", {
+            "support_code": support["support_code"]
         })
         self.assertEqual(status, 200)
-        _, bootstrap, _ = teacher_client.request("GET", "/api/bootstrap")
-        self.assertEqual(bootstrap["user"]["is_owner"], 0)
+        self.assertEqual(redeemed["teacher"]["username"], "lehrkraft_meyer")
+        status, users, _ = admin.request("GET", f"/api/classes/{klass['id']}/users")
+        self.assertEqual(status, 200)
+        self.assertEqual(users[0]["id"], student["id"])
 
-        status, classes, _ = teacher_client.request("GET", "/api/classes")
+        status, _, _ = teacher_client.request("DELETE", f"/api/support/requests/{support['id']}", {})
         self.assertEqual(status, 200)
-        self.assertEqual([item["id"] for item in classes], [class_a["id"]])
-        status, _, _ = teacher_client.request("POST", f"/api/classes/{class_a['id']}/users", {"first_name": "Lena"})
-        self.assertEqual(status, 200)
-        status, _, _ = teacher_client.request("POST", f"/api/classes/{class_b['id']}/users", {"first_name": "Noah"})
+        status, _, _ = admin.request("GET", f"/api/classes/{klass['id']}/users")
         self.assertEqual(status, 403)
-        status, _, _ = teacher_client.request("POST", "/api/classes", {"name": "KL24C"})
-        self.assertEqual(status, 403)
-        status, _, _ = teacher_client.request("GET", "/api/teachers")
-        self.assertEqual(status, 403)
-
-        status, teachers, _ = self.client.request("GET", "/api/teachers")
-        self.assertEqual(status, 200)
-        meyer = next(item for item in teachers if item["username"] == "meyer")
-        self.assertEqual([item["id"] for item in meyer["classes"]], [class_a["id"]])
-        status, _, _ = self.client.request("PATCH", f"/api/teachers/{meyer['id']}", {
-            "first_name": "Frau Meyer", "username": "meyer", "active": True,
-            "class_ids": [class_b["id"]],
-        })
-        self.assertEqual(status, 200)
-        _, reassigned, _ = teacher_client.request("GET", "/api/classes")
-        self.assertEqual([item["id"] for item in reassigned], [class_b["id"]])
 
 
 if __name__ == "__main__":

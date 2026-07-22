@@ -42,7 +42,7 @@ from .security import CodeVault, generate_access_code, hash_password, hash_sessi
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 ALLOWED_MEDIA_TYPES = {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 TEAM_COLORS = set(TEAM_COLOR_PALETTE)
-PRIVACY_VERSION = "2026-07-16.1"
+PRIVACY_VERSION = "2026-07-22.2"
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
@@ -133,10 +133,16 @@ class App:
         route("POST", r"/api/contact")(self.contact)
         route("POST", r"/api/setup")(self.setup)
         route("POST", r"/api/login")(self.login)
+        route("POST", r"/api/initial-password")(self.change_initial_password)
         route("GET", r"/api/privacy")(self.privacy_information)
         route("POST", r"/api/privacy/accept")(self.accept_privacy)
         route("POST", r"/api/logout")(self.logout)
         route("PATCH", r"/api/account")(self.update_own_account)
+        route("POST", r"/api/support/requests")(self.create_support_request)
+        route("GET", r"/api/support/requests")(self.list_support_requests)
+        route("DELETE", r"/api/support/requests/(?P<request_id>\d+)")(self.revoke_support_request)
+        route("POST", r"/api/support/redeem")(self.redeem_support_code)
+        route("GET", r"/api/support/grants")(self.list_support_grants)
         route("GET", r"/api/teachers")(self.list_teachers)
         route("POST", r"/api/teachers")(self.create_teacher)
         route("PATCH", r"/api/teachers/(?P<teacher_id>\d+)")(self.update_teacher)
@@ -198,7 +204,7 @@ class App:
                     match = pattern.match(path)
                     if route_method == method and match:
                         user, session = self.current_user(environ)
-                        if method in {"POST", "PATCH", "DELETE"} and path not in {"/api/setup", "/api/login", "/api/privacy/accept", "/api/contact"}:
+                        if method in {"POST", "PATCH", "DELETE"} and path not in {"/api/setup", "/api/login", "/api/initial-password", "/api/privacy/accept", "/api/contact"}:
                             if not session or not hmac.compare_digest(environ.get("HTTP_X_CSRF_TOKEN", ""), session["csrf_token"]):
                                 raise HttpError(403, "Sicherheitsprüfung fehlgeschlagen. Bitte laden Sie die Seite neu.")
                         result = handler(environ, user, **{k: int(v) for k, v in match.groupdict().items()})
@@ -302,16 +308,35 @@ class App:
             raise HttpError(403, "Diese Funktion ist der Geschäftsführung vorbehalten.")
         return user
 
+    def require_regular_teacher(self, user: dict[str, Any] | None) -> dict[str, Any]:
+        user = self.require_teacher(user)
+        if user.get("is_owner"):
+            raise HttpError(403, "Diese Funktion ist Lehrkraftkonten vorbehalten.")
+        return user
+
     def teacher_has_class(self, teacher_id: int, class_id: int) -> bool:
         return bool(self.db.one(
             "SELECT 1 ok FROM teacher_classes WHERE teacher_id=? AND class_id=?",
             (teacher_id, class_id),
         ))
 
+    def admin_supports_class(self, admin_id: int, class_id: int) -> bool:
+        return bool(self.db.one(
+            """SELECT 1 ok FROM support_requests sr
+               JOIN teacher_classes tc ON tc.teacher_id=sr.teacher_id
+               WHERE sr.granted_admin_id=? AND tc.class_id=? AND sr.status='active'
+                 AND sr.access_expires_at>? LIMIT 1""",
+            (admin_id, class_id, utcnow()),
+        ))
+
     def can_access_class(self, user: dict[str, Any], class_id: int) -> bool:
         return bool(
             user["role"] == "teacher"
-            and (user.get("is_owner") or self.teacher_has_class(user["id"], class_id))
+            and (
+                self.admin_supports_class(user["id"], class_id)
+                if user.get("is_owner")
+                else self.teacher_has_class(user["id"], class_id)
+            )
         )
 
     def require_class_access(self, user: dict[str, Any] | None, class_id: int) -> dict[str, Any]:
@@ -358,7 +383,7 @@ class App:
         session = self.db.one("SELECT * FROM sessions WHERE token_hash=? AND expires_at>?", (token_hash, utcnow()))
         if not session:
             return None, None
-        user = self.db.one("SELECT id,class_id,first_name,username,role,is_owner,active,last_login_at FROM users WHERE id=? AND active=1", (session["user_id"],))
+        user = self.db.one("SELECT id,class_id,first_name,username,role,is_owner,must_change_password,active,last_login_at FROM users WHERE id=? AND active=1", (session["user_id"],))
         if not user:
             return None, None
         return user, session
@@ -388,6 +413,7 @@ class App:
         result: dict[str, Any] = {
             "configured": configured,
             "setup_available": not configured,
+            "setup_token_required": bool(self.config.admin_setup_token),
             "has_accounts": has_accounts,
             "user": user,
         }
@@ -409,7 +435,7 @@ class App:
             },
             "sections": [
                 {"heading": "Zwecke der Verarbeitung", "paragraphs": [
-                    "ProjektKontor dient der Organisation schulischer Projekte, der Verteilung und Bearbeitung von Aufgaben, der Zusammenarbeit in Projektteams sowie der Dokumentation des Projektverlaufs.",
+                    "ProjektKontor dient der Organisation schulischer Projekte, der Verteilung und Bearbeitung von Aufgaben, der Zusammenarbeit in Projektteams sowie der Dokumentation des Projektverlaufs. Lehrkräfte können außerdem freiwillig einen befristeten Supportzugriff anfordern.",
                 ]},
                 {"heading": "Verarbeitete Daten", "items": [
                     "Kontodaten: Vorname, Benutzername, Klasse und Rolle.",
@@ -417,6 +443,7 @@ class App:
                     "Projektdaten: Mitgliedschaften, Team- und Leitungsrollen, Zuständigkeiten, Aufgaben, Status, Termine und Fortschritt.",
                     "Inhaltsdaten: Kommentare, Bearbeitungshinweise, Begründungen, Ergebnistexte und hochgeladene PDF- oder Bilddateien.",
                     "Sicherheitsdaten: fehlgeschlagene Anmeldeversuche mit Benutzername, Clientadresse und Zeitpunkt für höchstens 15 Minuten.",
+                    "Supportdaten: Telefonnummer, Beschreibung des Anliegens, gehashter Unterstützungscode sowie Beginn, Ende und Widerruf einer zeitlich begrenzten Supportfreigabe.",
                     "Nachweis dieser Information: Version und Zeitpunkt der Bestätigung.",
                 ]},
                 {"heading": "Herkunft der Daten", "paragraphs": [
@@ -424,13 +451,15 @@ class App:
                 ]},
                 {"heading": "Rechtsgrundlage", "paragraphs": [self.config.privacy_legal_basis]},
                 {"heading": "Empfänger und Sichtbarkeit", "paragraphs": [
-                    "Die Geschäftsführung beziehungsweise Lehrkraft kann die verwalteten Konten und Projektdaten einsehen. Projektmitglieder sehen die für ihr Projekt bestimmten Inhalte; teambezogene Aufgaben, Kommentare und Uploads sind grundsätzlich auf das jeweilige Team sowie die Leitungsrollen beschränkt. Der technische Hosting-Anbieter verarbeitet Daten nur im Rahmen des Serverbetriebs.",
+                    "Lehrkräfte können die Konten und Projektdaten ihrer eigenen Klassen einsehen. Projektmitglieder sehen die für ihr Projekt bestimmten Inhalte; teambezogene Aufgaben, Kommentare und Uploads sind grundsätzlich auf das jeweilige Team sowie die Leitungsrollen beschränkt. Der technische Hosting-Anbieter verarbeitet Daten nur im Rahmen des Serverbetriebs.",
+                    "Der Plattform-Admin sieht ohne Supportfreigabe keine Schüler-, Projekt- oder Unterrichtsdaten eines Lehrkraftkontos. Erst wenn die Lehrkraft einen Unterstützungscode erzeugt und persönlich übermittelt, wird ihr Bereich für höchstens zwei Stunden freigeschaltet. Die Lehrkraft kann diese Freigabe jederzeit widerrufen.",
                     "Eine Übermittlung in ein Drittland findet durch ProjektKontor selbst nicht statt. Falls ein Hosting-Anbieter außerhalb der EU oder des EWR eingesetzt wird, muss der Verantwortliche hierüber gesondert informieren.",
                 ]},
                 {"heading": "Speicherdauer", "items": [
                     "Schülerkonten werden bei einer angeordneten Löschung unmittelbar aus der aktiven Verwaltung entfernt.",
                     "Nach Projektabschluss kann ein dauerhafter PDF-Projektbericht erhalten bleiben; operative Aufgaben, Kommentare und Uploads können anschließend gelöscht werden.",
                     "Fehlgeschlagene Anmeldeversuche werden nach 15 Minuten gelöscht.",
+                    "Supportanfragen und die darin angegebene Telefonnummer werden spätestens 30 Tage nach ihrer Erstellung gelöscht; der eigentliche Datenzugriff endet spätestens zwei Stunden nach Einlösung des Codes.",
                     "Reguläre Sicherungen werden nach 14 Tagen ersetzt, sofern der Betreiber keine abweichende, dokumentierte Frist festlegt.",
                     "Die Bestätigung dieser Datenschutzinformation bleibt so lange gespeichert, wie das zugehörige Konto besteht.",
                 ]},
@@ -449,6 +478,14 @@ class App:
         }
 
     def authenticated_login_result(self, user_id: int) -> Any:
+        account = self.db.one("SELECT role,is_owner,must_change_password FROM users WHERE id=? AND active=1", (user_id,))
+        if account and account["role"] == "teacher" and not account.get("is_owner") and account.get("must_change_password"):
+            token = new_session_token()
+            expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(timespec="seconds")
+            with self.db.transaction() as connection:
+                connection.execute("DELETE FROM pending_logins WHERE user_id=? OR expires_at<=?", (user_id, utcnow()))
+                connection.execute("INSERT INTO pending_logins(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)", (hash_session_token(token, self.secret), user_id, expires_at, utcnow()))
+            return {"password_change_required": True, "password_change_token": token}
         accepted = self.db.one("SELECT 1 ok FROM privacy_acceptances WHERE user_id=? AND privacy_version=?", (user_id, PRIVACY_VERSION))
         if not accepted:
             token = new_session_token()
@@ -564,6 +601,8 @@ class App:
         first_name = str(data.get("first_name", "")).strip()
         username = str(data.get("username", "")).strip().lower()
         password = str(data.get("password", ""))
+        if self.config.admin_setup_token and not hmac.compare_digest(str(data.get("setup_token", "")), self.config.admin_setup_token):
+            raise HttpError(403, "Der Admin-Einrichtungscode ist nicht korrekt.")
         if not first_name or len(first_name) > 80 or not re.fullmatch(r"[a-zA-Z0-9._-]{3,50}", username) or not 10 <= len(password) <= 256:
             raise HttpError(400, "Bitte geben Sie Vorname, einen gültigen Benutzernamen und 10 bis 256 Kennwortzeichen ein.")
         credential = hash_password(password)
@@ -615,6 +654,35 @@ class App:
             self.db.execute("UPDATE users SET credential=? WHERE id=?", (hash_password(password), account["id"]))
         return self.authenticated_login_result(account["id"])
 
+    def change_initial_password(self, environ, user):
+        data = self.body(environ)
+        token = str(data.get("password_change_token", ""))
+        new_password = str(data.get("new_password", ""))
+        if not token or len(token) > 200 or not 10 <= len(new_password) <= 256:
+            raise HttpError(400, "Das neue Kennwort muss 10 bis 256 Zeichen lang sein.")
+        token_hash = hash_session_token(token, self.secret)
+        with self.db.transaction() as connection:
+            pending = connection.execute(
+                "SELECT * FROM pending_logins WHERE token_hash=? AND expires_at>?",
+                (token_hash, utcnow()),
+            ).fetchone()
+            if not pending:
+                raise HttpError(401, "Die Kennwortänderung ist abgelaufen. Bitte melden Sie sich erneut an.")
+            account = connection.execute(
+                "SELECT * FROM users WHERE id=? AND role='teacher' AND is_owner=0 AND active=1 AND must_change_password=1",
+                (pending["user_id"],),
+            ).fetchone()
+            if not account:
+                raise HttpError(403, "Für dieses Konto ist keine Initialkennwortänderung vorgesehen.")
+            if verify_password(new_password, account["credential"]):
+                raise HttpError(400, "Das neue Kennwort muss sich vom Initialkennwort unterscheiden.")
+            connection.execute(
+                "UPDATE users SET credential=?,must_change_password=0 WHERE id=?",
+                (hash_password(new_password), account["id"]),
+            )
+            connection.execute("DELETE FROM pending_logins WHERE token_hash=?", (token_hash,))
+        return self.authenticated_login_result(int(account["id"]))
+
     def logout(self, environ, user):
         _, session = self.current_user(environ)
         if session:
@@ -636,6 +704,8 @@ class App:
             raise HttpError(400, "Der Name muss 1 bis 80 Zeichen lang sein.")
         if not re.fullmatch(r"[a-zA-Z0-9._-]{3,50}", username):
             raise HttpError(400, "Der Benutzername muss 3 bis 50 zulässige Zeichen enthalten.")
+        if not user.get("is_owner") and username != account["username"] and not username.startswith("lehrkraft_"):
+            raise HttpError(400, "Benutzernamen für Lehrkräfte müssen mit „lehrkraft_“ beginnen.")
         if new_password and not 10 <= len(new_password) <= 256:
             raise HttpError(400, "Das neue Kennwort muss 10 bis 256 Zeichen lang sein.")
         if identity_change and not verify_password(str(data.get("current_password", "")), account["credential"]):
@@ -643,25 +713,153 @@ class App:
         credential = hash_password(new_password) if new_password else account["credential"]
         try:
             with self.db.transaction() as connection:
-                connection.execute("UPDATE users SET first_name=?,username=?,credential=? WHERE id=?", (first_name, username, credential, user["id"]))
+                connection.execute("UPDATE users SET first_name=?,username=?,credential=?,must_change_password=? WHERE id=?", (first_name, username, credential, 0 if new_password else account.get("must_change_password", 0), user["id"]))
                 if new_password:
                     connection.execute("DELETE FROM sessions WHERE user_id=? AND id<>?", (user["id"], session["id"]))
         except sqlite3.IntegrityError:
             raise HttpError(409, "Dieser Benutzername ist bereits vergeben.")
         return {"ok": True, "user": {"id": user["id"], "first_name": first_name, "username": username, "role": "teacher", "is_owner": user.get("is_owner", 0)}}
 
+    def create_support_request(self, environ, user):
+        teacher = self.require_regular_teacher(user)
+        retention_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(timespec="seconds")
+        self.db.execute("DELETE FROM support_requests WHERE created_at<? AND status!='active'", (retention_cutoff,))
+        data = self.body(environ)
+        phone = re.sub(r"\s+", " ", str(data.get("phone", "")).strip())
+        message = str(data.get("message", "")).strip()
+        if not 6 <= len(phone) <= 30 or not re.fullmatch(r"[0-9+()/ .-]+", phone):
+            raise HttpError(400, "Bitte geben Sie eine gültige Telefonnummer an.")
+        if not 10 <= len(message) <= 2000:
+            raise HttpError(400, "Bitte beschreiben Sie das Anliegen mit 10 bis 2.000 Zeichen.")
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        code = "".join(secrets.choice(alphabet) for _ in range(8))
+        code_hash = hash_session_token(code, self.secret)
+        code_expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(timespec="seconds")
+        self._send_support_email(teacher["first_name"], teacher["username"], phone, message)
+        with self.db.transaction() as connection:
+            connection.execute(
+                "UPDATE support_requests SET status='revoked' WHERE teacher_id=? AND status IN ('pending','active')",
+                (teacher["id"],),
+            )
+            cursor = connection.execute(
+                """INSERT INTO support_requests(teacher_id,code_hash,phone,message,status,code_expires_at,created_at)
+                   VALUES(?,?,?,?,'pending',?,?)""",
+                (teacher["id"], code_hash, phone, message, code_expires_at, utcnow()),
+            )
+            admins = connection.execute(
+                "SELECT id FROM users WHERE role='teacher' AND is_owner=1 AND active=1"
+            ).fetchall()
+            for admin in admins:
+                connection.execute(
+                    "INSERT INTO notifications(user_id,message,created_at) VALUES(?,?,?)",
+                    (admin["id"], f"Supportanfrage von {teacher['first_name']} ({teacher['username']})", utcnow()),
+                )
+        return {"id": int(cursor.lastrowid), "support_code": code, "code_expires_at": code_expires_at}
+
+    def list_support_requests(self, environ, user):
+        teacher = self.require_regular_teacher(user)
+        self.db.execute(
+            "UPDATE support_requests SET status='expired' WHERE teacher_id=? AND status='pending' AND code_expires_at<=?",
+            (teacher["id"], utcnow()),
+        )
+        self.db.execute(
+            "UPDATE support_requests SET status='expired' WHERE teacher_id=? AND status='active' AND access_expires_at<=?",
+            (teacher["id"], utcnow()),
+        )
+        return self.db.all(
+            """SELECT id,phone,message,status,code_expires_at,granted_at,access_expires_at,created_at
+               FROM support_requests WHERE teacher_id=? ORDER BY created_at DESC LIMIT 20""",
+            (teacher["id"],),
+        )
+
+    def revoke_support_request(self, environ, user, request_id):
+        teacher = self.require_regular_teacher(user)
+        with self.db.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE support_requests SET status='revoked' WHERE id=? AND teacher_id=? AND status IN ('pending','active')",
+                (request_id, teacher["id"]),
+            )
+            if cursor.rowcount != 1:
+                raise HttpError(404, "Aktive Supportfreigabe nicht gefunden.")
+        return {"ok": True}
+
+    def redeem_support_code(self, environ, user):
+        admin = self.require_owner(user)
+        code = re.sub(r"[^A-Z0-9]", "", str(self.body(environ).get("support_code", "")).upper())
+        if len(code) != 8:
+            raise HttpError(400, "Der Unterstützungscode besteht aus acht Zeichen.")
+        code_hash = hash_session_token(code, self.secret)
+        request = self.db.one(
+            "SELECT * FROM support_requests WHERE code_hash=? AND status='pending' AND code_expires_at>?",
+            (code_hash, utcnow()),
+        )
+        if not request:
+            raise HttpError(404, "Der Unterstützungscode ist ungültig oder abgelaufen.")
+        access_expires_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(timespec="seconds")
+        self.db.execute(
+            """UPDATE support_requests SET status='active',granted_admin_id=?,granted_at=?,access_expires_at=?
+               WHERE id=?""",
+            (admin["id"], utcnow(), access_expires_at, request["id"]),
+        )
+        teacher = self.db.one("SELECT id,first_name,username FROM users WHERE id=?", (request["teacher_id"],))
+        return {"teacher": teacher, "access_expires_at": access_expires_at}
+
+    def list_support_grants(self, environ, user):
+        admin = self.require_owner(user)
+        self.db.execute(
+            "UPDATE support_requests SET status='expired' WHERE status='active' AND access_expires_at<=?",
+            (utcnow(),),
+        )
+        grants = self.db.all(
+            """SELECT sr.id,sr.teacher_id,sr.phone,sr.message,sr.granted_at,sr.access_expires_at,
+                      u.first_name,u.username
+               FROM support_requests sr JOIN users u ON u.id=sr.teacher_id
+               WHERE sr.granted_admin_id=? AND sr.status='active' AND sr.access_expires_at>?
+               ORDER BY sr.access_expires_at DESC""",
+            (admin["id"], utcnow()),
+        )
+        for grant in grants:
+            grant["classes"] = self.db.all(
+                """SELECT c.id,c.name FROM teacher_classes tc JOIN classes c ON c.id=tc.class_id
+                   WHERE tc.teacher_id=? AND c.active=1 ORDER BY c.name""",
+                (grant["teacher_id"],),
+            )
+        return grants
+
+    def _send_support_email(self, teacher_name: str, username: str, phone: str, message: str) -> None:
+        config = self.config
+        sender = config.smtp_sender or config.smtp_username
+        if not config.contact_recipient or not config.smtp_host or not config.smtp_username or not config.smtp_password or not sender:
+            raise HttpError(503, "Die Supportanfrage kann noch nicht versendet werden, weil der Mailversand nicht eingerichtet ist.")
+        mail = EmailMessage()
+        mail["From"] = formataddr(("ProjektKontor Support", sender))
+        mail["To"] = config.contact_recipient
+        mail["Subject"] = f"ProjektKontor Supportanfrage: {teacher_name}"
+        mail.set_content(
+            f"Supportanfrage aus ProjektKontor\n\nLehrkraft: {teacher_name}\n"
+            f"Benutzername: {username}\nTelefon: {phone}\n\nAnliegen:\n{message}\n\n"
+            "Der Unterstützungscode wird von der Lehrkraft beim Rückruf mitgeteilt."
+        )
+        smtp_class = smtplib.SMTP_SSL if config.smtp_use_ssl else smtplib.SMTP
+        try:
+            with smtp_class(config.smtp_host, config.smtp_port, timeout=15) as smtp:
+                if not config.smtp_use_ssl:
+                    smtp.starttls()
+                smtp.login(config.smtp_username, config.smtp_password)
+                smtp.send_message(mail)
+        except (OSError, smtplib.SMTPException) as exc:
+            raise HttpError(503, "Die Supportanfrage konnte gerade nicht versendet werden.") from exc
+
     def list_teachers(self, environ, user):
         self.require_owner(user)
         teachers = self.db.all(
-            "SELECT id,first_name,username,is_owner,active,last_login_at,created_at "
-            "FROM users WHERE role='teacher' ORDER BY is_owner DESC,first_name,username"
+            """SELECT u.id,u.first_name,u.username,u.is_owner,u.active,u.last_login_at,u.created_at,
+                      (SELECT COUNT(*) FROM teacher_classes tc WHERE tc.teacher_id=u.id) class_count,
+                      EXISTS(SELECT 1 FROM support_requests sr WHERE sr.teacher_id=u.id AND sr.status='active'
+                        AND sr.access_expires_at>?) support_active
+               FROM users u WHERE u.role='teacher' AND u.is_owner=0 ORDER BY u.first_name,u.username""",
+            (utcnow(),),
         )
-        for teacher in teachers:
-            teacher["classes"] = self.db.all(
-                "SELECT c.id,c.name FROM teacher_classes tc JOIN classes c ON c.id=tc.class_id "
-                "WHERE tc.teacher_id=? AND c.active=1 ORDER BY c.name",
-                (teacher["id"],),
-            )
         return teachers
 
     def create_teacher(self, environ, user):
@@ -669,32 +867,20 @@ class App:
         data = self.body(environ)
         first_name = str(data.get("first_name", "")).strip()
         username = str(data.get("username", "")).strip().lower()
-        class_ids = sorted({int(value) for value in data.get("class_ids", [])})
+        if data.get("class_ids"):
+            raise HttpError(400, "Klassen werden durch die Lehrkraft selbst angelegt und verwaltet.")
         if not first_name or len(first_name) > 80:
             raise HttpError(400, "Der Name muss 1 bis 80 Zeichen lang sein.")
-        if not re.fullmatch(r"[a-zA-Z0-9._-]{3,50}", username):
-            raise HttpError(400, "Der Benutzername muss 3 bis 50 zulässige Zeichen enthalten.")
+        if not username.startswith("lehrkraft_") or not re.fullmatch(r"lehrkraft_[a-zA-Z0-9._-]{3,40}", username):
+            raise HttpError(400, "Der Benutzername muss mit „lehrkraft_“ beginnen und danach 3 bis 40 zulässige Zeichen enthalten.")
         initial_password = generate_access_code(12)
         try:
             with self.db.transaction() as connection:
-                existing_classes = {
-                    int(row[0]) for row in connection.execute(
-                        f"SELECT id FROM classes WHERE active=1 AND id IN ({','.join('?' for _ in class_ids)})",
-                        tuple(class_ids),
-                    ).fetchall()
-                } if class_ids else set()
-                if existing_classes != set(class_ids):
-                    raise HttpError(400, "Mindestens eine ausgewählte Klasse ist nicht verfügbar.")
                 cursor = connection.execute(
-                    "INSERT INTO users(first_name,username,credential,role,is_owner,active,created_at) VALUES(?,?,?,?,0,1,?)",
+                    "INSERT INTO users(first_name,username,credential,role,is_owner,must_change_password,active,created_at) VALUES(?,?,?,?,0,1,1,?)",
                     (first_name, username, hash_password(initial_password), "teacher", utcnow()),
                 )
                 teacher_id = int(cursor.lastrowid)
-                for class_id in class_ids:
-                    connection.execute(
-                        "INSERT INTO teacher_classes(teacher_id,class_id,assigned_at) VALUES(?,?,?)",
-                        (teacher_id, class_id, utcnow()),
-                    )
         except sqlite3.IntegrityError:
             raise HttpError(409, "Dieser Benutzername ist bereits vergeben.")
         return {"id": teacher_id, "initial_password": initial_password}
@@ -710,33 +896,20 @@ class App:
         first_name = str(data.get("first_name", teacher["first_name"])).strip()
         username = str(data.get("username", teacher["username"])).strip().lower()
         active = int(bool(data.get("active", teacher["active"])))
-        class_ids = sorted({int(value) for value in data.get("class_ids", [])}) if "class_ids" in data else None
-        if not first_name or len(first_name) > 80 or not re.fullmatch(r"[a-zA-Z0-9._-]{3,50}", username):
+        if data.get("class_ids"):
+            raise HttpError(400, "Klassenzuordnungen werden durch die Lehrkraft selbst verwaltet.")
+        if not first_name or len(first_name) > 80 or not re.fullmatch(r"lehrkraft_[a-zA-Z0-9._-]{3,40}", username):
             raise HttpError(400, "Name oder Benutzername ist ungültig.")
         initial_password = generate_access_code(12) if data.get("reset_password") else None
+        if initial_password and teacher.get("last_login_at"):
+            raise HttpError(403, "Nach der ersten Anmeldung ändert nur die Lehrkraft selbst ihr Kennwort.")
         try:
             with self.db.transaction() as connection:
-                if class_ids is not None:
-                    existing_classes = {
-                        int(row[0]) for row in connection.execute(
-                            f"SELECT id FROM classes WHERE active=1 AND id IN ({','.join('?' for _ in class_ids)})",
-                            tuple(class_ids),
-                        ).fetchall()
-                    } if class_ids else set()
-                    if existing_classes != set(class_ids):
-                        raise HttpError(400, "Mindestens eine ausgewählte Klasse ist nicht verfügbar.")
                 credential = hash_password(initial_password) if initial_password else teacher["credential"]
                 connection.execute(
-                    "UPDATE users SET first_name=?,username=?,credential=?,active=? WHERE id=?",
-                    (first_name, username, credential, active, teacher_id),
+                    "UPDATE users SET first_name=?,username=?,credential=?,must_change_password=?,active=? WHERE id=?",
+                    (first_name, username, credential, 1 if initial_password else teacher.get("must_change_password", 0), active, teacher_id),
                 )
-                if class_ids is not None:
-                    connection.execute("DELETE FROM teacher_classes WHERE teacher_id=?", (teacher_id,))
-                    for class_id in class_ids:
-                        connection.execute(
-                            "INSERT INTO teacher_classes(teacher_id,class_id,assigned_at) VALUES(?,?,?)",
-                            (teacher_id, class_id, utcnow()),
-                        )
                 if not active or initial_password:
                     connection.execute("DELETE FROM sessions WHERE user_id=?", (teacher_id,))
         except sqlite3.IntegrityError:
@@ -749,7 +922,14 @@ class App:
     def list_classes(self, environ, user):
         user = self.require_teacher(user)
         if user.get("is_owner"):
-            return self.db.all("SELECT c.*, (SELECT COUNT(*) FROM users u WHERE u.class_id=c.id) user_count FROM classes c WHERE c.active=1 ORDER BY name")
+            return self.db.all(
+                """SELECT DISTINCT c.*, (SELECT COUNT(*) FROM users u WHERE u.class_id=c.id) user_count
+                   FROM classes c JOIN teacher_classes tc ON tc.class_id=c.id
+                   JOIN support_requests sr ON sr.teacher_id=tc.teacher_id
+                   WHERE c.active=1 AND sr.granted_admin_id=? AND sr.status='active'
+                     AND sr.access_expires_at>? ORDER BY c.name""",
+                (user["id"], utcnow()),
+            )
         return self.db.all(
             "SELECT c.*, (SELECT COUNT(*) FROM users u WHERE u.class_id=c.id) user_count "
             "FROM classes c JOIN teacher_classes tc ON tc.class_id=c.id "
@@ -758,7 +938,7 @@ class App:
         )
 
     def create_class(self, environ, user):
-        self.require_owner(user)
+        teacher = self.require_regular_teacher(user)
         name = str(self.body(environ).get("name", "")).strip()
         if not name:
             raise HttpError(400, "Die Klassenbezeichnung darf nicht leer sein.")
@@ -767,13 +947,19 @@ class App:
         if not re.fullmatch(r"[A-Za-zÄÖÜäöüß0-9._-]{2,30}", name):
             raise HttpError(400, "Die Klassenbezeichnung muss 2 bis 30 Zeichen lang sein. Erlaubt sind Buchstaben, Zahlen, Punkte, Bindestriche und Unterstriche.")
         try:
-            class_id = self.db.execute("INSERT INTO classes(name,created_at) VALUES(?,?)", (name,utcnow()))
+            with self.db.transaction() as connection:
+                cursor = connection.execute("INSERT INTO classes(name,created_at) VALUES(?,?)", (name,utcnow()))
+                class_id = int(cursor.lastrowid)
+                connection.execute(
+                    "INSERT INTO teacher_classes(teacher_id,class_id,assigned_at) VALUES(?,?,?)",
+                    (teacher["id"], class_id, utcnow()),
+                )
         except sqlite3.IntegrityError:
             raise HttpError(409, "Diese Klasse existiert bereits.")
         return {"id": class_id, "name": name}
 
     def update_class(self, environ, user, class_id):
-        self.require_owner(user)
+        self.require_class_access(user, class_id)
         current = self.db.one("SELECT * FROM classes WHERE id=? AND active=1", (class_id,))
         if not current:
             raise HttpError(404, "Klasse nicht gefunden")
@@ -791,7 +977,7 @@ class App:
         return {"id": class_id, "name": name}
 
     def delete_class(self, environ, user, class_id):
-        teacher = self.require_owner(user)
+        teacher = self.require_class_access(user, class_id)
         data = self.body(environ)
         active_projects = self.db.one("SELECT COUNT(*) count FROM projects WHERE class_id=? AND status IN ('draft','active')", (class_id,))["count"]
         if active_projects:
@@ -819,8 +1005,15 @@ class App:
 
     def list_all_users(self, environ, user):
         user = self.require_teacher(user)
-        scope_sql = "" if user.get("is_owner") else " AND u.class_id IN (SELECT class_id FROM teacher_classes WHERE teacher_id=?)"
-        scope_params = () if user.get("is_owner") else (user["id"],)
+        if user.get("is_owner"):
+            scope_sql = """ AND u.class_id IN (
+                SELECT tc.class_id FROM teacher_classes tc JOIN support_requests sr ON sr.teacher_id=tc.teacher_id
+                WHERE sr.granted_admin_id=? AND sr.status='active' AND sr.access_expires_at>?
+            )"""
+            scope_params = (user["id"], utcnow())
+        else:
+            scope_sql = " AND u.class_id IN (SELECT class_id FROM teacher_classes WHERE teacher_id=?)"
+            scope_params = (user["id"],)
         rows = self.db.all(f"""
             SELECT u.id,u.class_id,u.first_name,u.username,u.active,u.last_login_at,u.credential,
                    COALESCE(c.name,'Ohne Klasse') class_name
@@ -878,7 +1071,7 @@ class App:
 
     def download_account_template(self, environ, user, class_id=None):
         if class_id is None:
-            self.require_owner(user)
+            self.require_regular_teacher(user)
             return account_template(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "ProjektKontor-Import-Alle-Klassen.xlsx", []
         self.require_class_access(user, class_id)
         class_row = self.db.one("SELECT name FROM classes WHERE id=?", (class_id,))
@@ -886,7 +1079,7 @@ class App:
         return account_template(class_row["name"]), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"ProjektKontor-Import-{class_row['name']}.xlsx", []
 
     def import_preview(self, environ, user, class_id=None):
-        teacher = self.require_owner(user) if class_id is None else self.require_class_access(user, class_id)
+        teacher = self.require_regular_teacher(user) if class_id is None else self.require_class_access(user, class_id)
         data = self.body(environ)
         try: raw = base64.b64decode(data.get("file_base64", ""), validate=True)
         except Exception as exc: raise HttpError(400, "Excel-Datei fehlt.") from exc
@@ -908,13 +1101,14 @@ class App:
                         row["error"]="Klassenbezeichnung ungültig (2–30 Zeichen, ohne Leerzeichen)."
                         continue
                     target=class_lookup.get(target_name.casefold())
-                    if not teacher.get("is_owner") and (target is None or not self.teacher_has_class(teacher["id"], int(target["id"]))):
+                    if target is not None and not self.can_access_class(teacher, int(target["id"])):
                         row["error"]="Diese Klasse wurde Ihrer Lehrkraft nicht freigeschaltet."
                         continue
                     row["new_class"]=target is None or not target["active"]
                     if target is None:
                         cursor=connection.execute("INSERT INTO classes(name,created_at) VALUES(?,?)",(target_name,utcnow()))
                         target={"id":int(cursor.lastrowid),"name":target_name,"active":1}
+                        connection.execute("INSERT INTO teacher_classes(teacher_id,class_id,assigned_at) VALUES(?,?,?)",(teacher["id"],target["id"],utcnow()))
                         class_lookup[target_name.casefold()]=target
                     row["class_id"]=int(target["id"])
                     normalized=row["first_name"].strip().casefold()
@@ -928,7 +1122,7 @@ class App:
         return {"rows": rows}
 
     def import_accounts(self, environ, user, class_id=None):
-        teacher = self.require_owner(user) if class_id is None else self.require_class_access(user, class_id)
+        teacher = self.require_regular_teacher(user) if class_id is None else self.require_class_access(user, class_id)
         data = self.body(environ); rows = data.get("rows", [])
         if not isinstance(rows, list) or not rows: raise HttpError(400, "Keine Importdaten vorhanden.")
         if any(row.get("duplicate") and not row.get("skip") for row in rows) and not data.get("confirm_duplicates"):
@@ -948,11 +1142,12 @@ class App:
                 if any(character.isspace() for character in target_name) or not re.fullmatch(r"[A-Za-zÄÖÜäöüß0-9._-]{2,30}",target_name):
                     raise HttpError(400,f"Ungültige Klassenbezeichnung: {target_name or 'leer'}")
                 target=class_lookup.get(target_name.casefold())
-                if not teacher.get("is_owner") and (target is None or not self.teacher_has_class(teacher["id"], int(target["id"]))):
+                if target is not None and not self.can_access_class(teacher, int(target["id"])):
                     raise HttpError(403,"Diese Klasse wurde Ihrer Lehrkraft nicht freigeschaltet.")
                 if target is None:
                     cursor=connection.execute("INSERT INTO classes(name,created_at) VALUES(?,?)",(target_name,utcnow()))
                     target={"id":int(cursor.lastrowid),"name":target_name,"active":1};class_lookup[target_name.casefold()]=target;created_classes.append(target_name)
+                    connection.execute("INSERT INTO teacher_classes(teacher_id,class_id,assigned_at) VALUES(?,?,?)",(teacher["id"],target["id"],utcnow()))
                 elif not target["active"]:
                     connection.execute("UPDATE classes SET active=1 WHERE id=?",(target["id"],));target["active"]=1;created_classes.append(target["name"])
                 username = next_username(connection, first_name)
@@ -966,7 +1161,7 @@ class App:
         teacher = self.require_teacher(user)
         account = self.db.one("SELECT * FROM users WHERE id=? AND role='student'", (user_id,))
         if not account: raise HttpError(404,"Konto nicht gefunden")
-        if not teacher.get("is_owner") and (account["class_id"] is None or not self.teacher_has_class(teacher["id"], account["class_id"])):
+        if account["class_id"] is None or not self.can_access_class(teacher, account["class_id"]):
             raise HttpError(403,"Dieser Zugang gehört nicht zu einer freigeschalteten Klasse.")
         data = self.body(environ)
         first_name = str(data.get("first_name",account["first_name"])).strip()
@@ -978,7 +1173,7 @@ class App:
         class_id = int(raw_class_id) if raw_class_id not in (None, "") else None
         if class_id is not None and not self.db.one("SELECT 1 ok FROM classes WHERE id=? AND active=1", (class_id,)):
             raise HttpError(404, "Zielklasse nicht gefunden")
-        if class_id is not None and not teacher.get("is_owner") and not self.teacher_has_class(teacher["id"], class_id):
+        if class_id is not None and not self.can_access_class(teacher, class_id):
             raise HttpError(403,"Die Zielklasse wurde Ihrer Lehrkraft nicht freigeschaltet.")
         credential = self.vault.encrypt(str(data["access_code"])) if "access_code" in data else account["credential"]
         try:
@@ -991,7 +1186,7 @@ class App:
         account = self.db.one("SELECT class_id FROM users WHERE id=? AND role='student'", (user_id,))
         if not account:
             raise HttpError(404,"Konto nicht gefunden")
-        if not teacher.get("is_owner") and (account["class_id"] is None or not self.teacher_has_class(teacher["id"], account["class_id"])):
+        if account["class_id"] is None or not self.can_access_class(teacher, account["class_id"]):
             raise HttpError(403,"Dieser Zugang gehört nicht zu einer freigeschalteten Klasse.")
         count = self.db.one("""SELECT COUNT(*) count FROM task_assignees a JOIN tasks t ON t.id=a.task_id JOIN projects p ON p.id=t.project_id WHERE a.user_id=? AND p.status='active'""", (user_id,))["count"]
         if count: raise HttpError(409,"Das Konto besitzt noch Aufgaben in aktiven Projekten. Bitte ordnen Sie diese zuerst neu zu.")
@@ -1032,11 +1227,15 @@ class App:
             WHERE (?='student' AND p.status IN ('draft','active'))
                OR EXISTS(SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?)
                OR p.project_lead_id=?
-               OR (?='teacher' AND (?=1 OR EXISTS(
+               OR (?='teacher' AND (EXISTS(
                     SELECT 1 FROM teacher_classes tc WHERE tc.teacher_id=? AND tc.class_id=p.class_id
+               ) OR EXISTS(
+                    SELECT 1 FROM support_requests sr JOIN teacher_classes tc ON tc.teacher_id=sr.teacher_id
+                    WHERE sr.granted_admin_id=? AND sr.status='active' AND sr.access_expires_at>?
+                      AND tc.class_id=p.class_id
                )))
             ORDER BY CASE p.status WHEN 'active' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END,p.updated_at DESC""",
-            (user["id"], user["role"], user["id"], user["id"], user["role"], int(bool(user.get("is_owner"))), user["id"]),
+            (user["id"], user["role"], user["id"], user["id"], user["role"], user["id"], user["id"], utcnow()),
         )
         for row in rows:
             row["can_open"] = bool(row.pop("is_member") or self.can_manage_project(user, row))
@@ -1066,18 +1265,18 @@ class App:
         with self.db.transaction() as connection:
             if not connection.execute("SELECT 1 FROM classes WHERE id=? AND active=1",(class_id,)).fetchone(): raise HttpError(400,"Ungültige Projektklasse")
             if not connection.execute("""SELECT 1 FROM users u WHERE u.id=? AND u.active=1 AND (
-                u.class_id=? OR (u.role='teacher' AND (u.is_owner=1 OR EXISTS(
+                u.class_id=? OR (u.role='teacher' AND EXISTS(
                     SELECT 1 FROM teacher_classes tc WHERE tc.teacher_id=u.id AND tc.class_id=?
-                )))
+                ))
             )""",(lead_id,class_id,class_id)).fetchone(): raise HttpError(400,"Ungültige Gesamtprojektleitung")
             cur=connection.execute("""INSERT INTO projects(class_id,title,description,start_at,end_at,has_start,has_end,start_has_time,end_has_time,project_lead_id,status,team_min_size,team_max_size,created_at,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)""",(class_id,title,str(data.get("description","")),start_at,end_at,has_start,has_end,start_has_time,end_has_time,lead_id,data.get("team_min_size"),data.get("team_max_size"),utcnow(),utcnow()))
             project_id=cur.lastrowid
             for member_id in set(member_ids):
                 if not connection.execute("""SELECT 1 FROM users u WHERE u.id=? AND u.active=1 AND (
-                    u.class_id=? OR (u.role='teacher' AND (u.is_owner=1 OR EXISTS(
+                    u.class_id=? OR (u.role='teacher' AND EXISTS(
                         SELECT 1 FROM teacher_classes tc WHERE tc.teacher_id=u.id AND tc.class_id=?
-                    )))
+                    ))
                 )""",(member_id,class_id,class_id)).fetchone(): raise HttpError(400,"Ein Projektmitglied gehört nicht zur Projektklasse")
                 connection.execute("INSERT INTO project_members(project_id,user_id,joined_at) VALUES(?,?,?)",(project_id,member_id,utcnow()))
             if user["id"] not in member_ids: connection.execute("INSERT OR IGNORE INTO project_members(project_id,user_id,joined_at) VALUES(?,?,?)",(project_id,user["id"],utcnow()))
@@ -1197,9 +1396,9 @@ class App:
         if "project_lead_id" in data:
             lead_id = int(data["project_lead_id"] or 0)
             if not self.db.one("""SELECT 1 ok FROM users u WHERE u.id=? AND u.active=1 AND (
-                u.class_id=? OR (u.role='teacher' AND (u.is_owner=1 OR EXISTS(
+                u.class_id=? OR (u.role='teacher' AND EXISTS(
                     SELECT 1 FROM teacher_classes tc WHERE tc.teacher_id=u.id AND tc.class_id=?
-                )))
+                ))
             )""", (lead_id, project["class_id"], project["class_id"])):
                 raise HttpError(400, "Ungültige Gesamtprojektleitung")
             if not self.db.one("SELECT 1 ok FROM project_members WHERE project_id=? AND user_id=?", (project_id, lead_id)):
@@ -1420,8 +1619,8 @@ class App:
 
     def notify_leads(self,project_id,task_id,message):
         project=self.db.one("SELECT project_lead_id,class_id FROM projects WHERE id=?",(project_id,));teachers=self.db.all("""SELECT DISTINCT u.id FROM users u
-            LEFT JOIN teacher_classes tc ON tc.teacher_id=u.id AND tc.class_id=?
-            WHERE u.role='teacher' AND u.active=1 AND (u.is_owner=1 OR tc.class_id IS NOT NULL)""",(project["class_id"],))
+            JOIN teacher_classes tc ON tc.teacher_id=u.id AND tc.class_id=?
+            WHERE u.role='teacher' AND u.is_owner=0 AND u.active=1""",(project["class_id"],))
         ids={project["project_lead_id"],*(x["id"] for x in teachers)}
         with self.db.transaction() as connection:
             for user_id in ids:connection.execute("INSERT INTO notifications(user_id,project_id,task_id,message,created_at) VALUES(?,?,?,?,?)",(user_id,project_id,task_id,message,utcnow()))
@@ -1619,7 +1818,15 @@ class App:
     def list_templates(self,environ,user):
         user=self.require_teacher(user)
         if user.get("is_owner"):
-            return self.db.all("SELECT id,name,source_project_id,created_at FROM templates ORDER BY name")
+            return self.db.all(
+                """SELECT DISTINCT t.id,t.name,t.source_project_id,t.created_at
+                   FROM templates t JOIN projects p ON p.id=t.source_project_id
+                   JOIN teacher_classes tc ON tc.class_id=p.class_id
+                   JOIN support_requests sr ON sr.teacher_id=tc.teacher_id
+                   WHERE sr.granted_admin_id=? AND sr.status='active' AND sr.access_expires_at>?
+                   ORDER BY t.name""",
+                (user["id"], utcnow()),
+            )
         return self.db.all(
             """SELECT t.id,t.name,t.source_project_id,t.created_at
                FROM templates t JOIN projects p ON p.id=t.source_project_id
