@@ -2,6 +2,9 @@ services:
   app:
     build: .
     restart: unless-stopped
+    networks:
+      - default
+      - proxy
     environment:
       PK_DATA_DIR: /data
       PK_SECRET_KEY: ${PK_SECRET_KEY:?Bitte in .env festlegen}
@@ -38,22 +41,6 @@ services:
       timeout: 5s
       retries: 3
 
-  caddy:
-    image: caddy:2.11.3-alpine
-    restart: unless-stopped
-    depends_on:
-      app:
-        condition: service_healthy
-    environment:
-      PROJECTKONTOR_DOMAIN: ${PROJECTKONTOR_DOMAIN:?Bitte in .env festlegen}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-
   backup:
     build: .
     restart: unless-stopped
@@ -77,5 +64,7 @@ services:
 
 volumes:
   projektkontor_data:
-  caddy_data:
-  caddy_config:
+
+networks:
+  proxy:
+    external: true
