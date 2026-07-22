@@ -597,6 +597,8 @@ class AppFlowTest(unittest.TestCase):
         self.assertNotIn(b"Kein zus\xc3\xa4tzlicher Verwaltungsort", landing)
         self.assertIn(b'href="/login">Sch\xc3\xbclerlogin', landing)
         self.assertIn(b'<link rel="canonical" href="https://projektkontor.org/">', landing)
+        self.assertIn(b'<link rel="icon" type="image/png" sizes="64x64" href="/favicon.png">', landing)
+        self.assertIn(b'<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">', landing)
         self.assertNotIn(b'id="login-form"', landing)
         self.assertNotIn("X-Robots-Tag", headers)
         status, login, _ = self.client.request("GET", "/login")
