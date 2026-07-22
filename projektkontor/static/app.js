@@ -42,17 +42,18 @@ async function boot(){
   if(!data.user){
     $('#auth').classList.remove('hidden');
     $('#show-setup').classList.toggle('hidden',!data.setup_available);
-    if(data.setup_available&&!data.has_accounts)showSetup();else showLogin();
+    showLogin();
     return
   }
   state.user=data.user;state.csrf=data.csrf;$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');
-  $('#current-name').textContent=data.user.first_name;$('#current-role').textContent=data.user.role==='teacher'?(data.user.is_owner?'Geschäftsführung':'Klassenleitung'):'Projektmitglied';
+  $('#current-name').textContent=data.user.first_name;$('#current-role').textContent=data.user.role==='teacher'?(data.user.is_owner?'Admin':'Klassenleitung'):'Projektmitglied';
   if(data.user.role!=='teacher')$$('.teacher-only').forEach(x=>x.classList.add('hidden'));
   if(!data.user.is_owner)$$('.owner-only').forEach(x=>x.classList.add('hidden'));
   updateNotificationCount(data.unread_notifications||0); window.addEventListener('hashchange',route); route();
 }
-function showLogin(){$('#login-form').classList.remove('hidden');$('#setup-form').classList.add('hidden');$('#login-heading').textContent='ProjektKontor';$('#auth-intro').textContent='Mit Lehrkraftkonto oder Schülerzugang anmelden.'}
-function showSetup(){$('#setup-form').classList.remove('hidden');$('#login-form').classList.add('hidden');$('#login-heading').textContent='ProjektKontor einrichten';$('#auth-intro').textContent='Richten Sie einmalig die Geschäftsführung dieser Installation ein.'}
+function showLogin(){$('#login-form').classList.remove('hidden');$('#setup-form').classList.add('hidden');$('#login-heading').textContent='ProjektKontor';$('#auth-intro').textContent='Wählen Sie Ihren Zugang und melden Sie sich mit den zugeteilten Daten an.';updateLoginType()}
+function showSetup(){$('#setup-form').classList.remove('hidden');$('#login-form').classList.add('hidden');$('#login-heading').textContent='Admin-Ersteinrichtung';$('#auth-intro').textContent='Dieser Schritt ist nur bei einer neuen Installation erforderlich.'}
+function updateLoginType(){const form=$('#login-form'),type=field(form,'login_type')||'student',username=$('[name=username]',form),label=$('#login-secret-label');username.placeholder=type==='student'?'z. B. vorname01':type==='teacher'?'z. B. meyer':'Admin-Benutzername';label.textContent=type==='student'?'Zugangscode':'Kennwort'}
 function updateNotificationCount(count){const b=$('#notification-count');b.textContent=count;b.classList.toggle('hidden',!count)}
 
 async function finishAuthentication(result){
@@ -70,7 +71,8 @@ async function privacyDialog(token=null,version=null){
     if(token)$('#confirm-privacy',dlg).addEventListener('click',async event=>{event.preventDefault();event.target.disabled=true;try{const result=await api('/api/privacy/accept',{method:'POST',body:{privacy_token:token,privacy_version:version}});state.csrf=result.csrf;location.reload()}catch(error){event.target.disabled=false;toast(error.message,true)}});
   }catch(error){toast(error.message,true)}
 }
-$('#login-form').addEventListener('submit',async e=>{e.preventDefault();try{await finishAuthentication(await api('/api/login',{method:'POST',body:{username:field(e.target,'username'),password:field(e.target,'password')}}))}catch(err){toast(err.message,true)}});
+$('#login-form').addEventListener('submit',async e=>{e.preventDefault();try{await finishAuthentication(await api('/api/login',{method:'POST',body:{login_type:field(e.target,'login_type'),username:field(e.target,'username'),password:field(e.target,'password')}}))}catch(err){toast(err.message,true)}});
+$$('input[name=login_type]',$('#login-form')).forEach(input=>input.addEventListener('change',updateLoginType));
 $('#setup-form').addEventListener('submit',async e=>{e.preventDefault();try{await finishAuthentication(await api('/api/setup',{method:'POST',body:{first_name:field(e.target,'first_name'),username:field(e.target,'username'),password:field(e.target,'password')}}))}catch(err){toast(err.message,true)}});
 $('#show-setup').addEventListener('click',showSetup);
 $('#show-login').addEventListener('click',showLogin);

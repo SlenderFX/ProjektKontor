@@ -32,7 +32,7 @@ Teambeitrag. Der Gesamtstand ergibt sich aus den Teambeiträgen.
 
 ## Berechtigungsgrenzen
 
-- Geschäftsführung: globaler Zugriff und globale Verwaltung
+- Admin/Geschäftsführung: globaler Zugriff und globale Verwaltung
 - Klassenleitung: Verwaltung der durch die Geschäftsführung freigeschalteten
   Klassen, Schülerzugänge und zugehörigen Projekte
 - Gesamtprojektleitung: Vollzugriff innerhalb des jeweiligen Projekts
@@ -49,7 +49,10 @@ Serververwaltung.
 
 ## Zugangsdaten
 
-Lehrkraftkonten werden ausschließlich durch die Geschäftsführung angelegt und
+Die Anmeldung trennt Schüler-, Lehrkraft- und Adminzugänge. Das technische
+Administrationskonto übernimmt innerhalb der Unterrichtssimulation zugleich
+die Rolle der Geschäftsführung. Lehrkraftkonten werden ausschließlich durch
+den Admin angelegt und
 freigeschaltet. Das erzeugte Initialkennwort wird nur unmittelbar nach Anlage
 oder Zurücksetzung angezeigt. Lehrkraftkennwörter werden nicht auslesbar als
 Scrypt-Hash gespeichert.

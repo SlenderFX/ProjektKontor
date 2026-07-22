@@ -576,9 +576,10 @@ class App:
 
     def login(self, environ, user):
         data = self.body(environ)
+        login_type = str(data.get("login_type", "auto")).strip().lower()
         username = str(data.get("username", "")).strip().lower()
         password = str(data.get("password", ""))
-        if len(username) > 80 or len(password) > 256:
+        if login_type not in {"auto", "student", "teacher", "admin"} or len(username) > 80 or len(password) > 256:
             raise HttpError(401, "Benutzername oder Zugangsdaten sind nicht korrekt.")
         remote_addr = self.client_ip(environ)
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat(timespec="seconds")
@@ -591,9 +592,15 @@ class App:
         account = self.db.one("SELECT * FROM users WHERE username=? COLLATE NOCASE AND active=1", (username,))
         valid = False
         if account:
-            if account["role"] == "teacher":
+            matches_login_type = (
+                login_type == "auto"
+                or (login_type == "student" and account["role"] == "student")
+                or (login_type == "teacher" and account["role"] == "teacher" and not account.get("is_owner"))
+                or (login_type == "admin" and account["role"] == "teacher" and bool(account.get("is_owner")))
+            )
+            if matches_login_type and account["role"] == "teacher":
                 valid = verify_password(password, account["credential"])
-            else:
+            elif matches_login_type:
                 try:
                     entered_code = password.strip().upper()
                     stored_code = self.vault.decrypt(account["credential"]).strip().upper()

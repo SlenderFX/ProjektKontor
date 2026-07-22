@@ -19,10 +19,11 @@ pip install -r requirements.txt
 python -m projektkontor
 ```
 
-Anschließend `http://127.0.0.1:8080` öffnen. Nur bei einer leeren Installation
-wird einmalig das Konto der Geschäftsführung eingerichtet. Danach bleibt die
-gemeinsame Anmeldung für Lehrkräfte und Lernende sichtbar. Weitere Lehrkräfte
-werden von der Geschäftsführung angelegt, freigeschaltet und Klassen zugeordnet.
+Anschließend `http://127.0.0.1:8080` öffnen. Die Anmeldung unterscheidet klar
+zwischen Schüler, Lehrkraft und Admin. Nur bei einer leeren Installation wird
+einmalig das Administrationskonto eingerichtet. Schüler- und Lehrkraftkonten
+können sich nicht selbst registrieren: Der Admin legt Lehrkräfte an und schaltet
+ihnen Klassen frei; Schülerzugänge entstehen ausschließlich in der Verwaltung.
 
 Für einen schnellen Test ohne Installation kann der von Codex bereitgestellte
 Python verwendet werden, sofern die Abhängigkeiten dort vorhanden sind.

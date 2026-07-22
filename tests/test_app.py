@@ -760,7 +760,49 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"show-setup", index)
         status, script, _ = self.client.request("GET", "/app.js")
         self.assertEqual(status, 200)
-        self.assertIn(b"Mit Lehrkraftkonto oder Sch\xc3\xbclerzugang anmelden", script)
+        self.assertIn(b"login_type", script)
+        self.assertIn(b"W\xc3\xa4hlen Sie Ihren Zugang", script)
+
+    def test_login_type_separates_student_teacher_and_admin(self):
+        self.client.request("POST", "/api/setup", {
+            "first_name": "Jeroen", "username": "verwaltung", "password": "sicheres-testkennwort"
+        })
+        _, klass, _ = self.client.request("POST", "/api/classes", {"name": "ROLLEN24"})
+        _, student, _ = self.client.request("POST", f"/api/classes/{klass['id']}/users", {"first_name": "Lena"})
+        _, teacher, _ = self.client.request("POST", "/api/teachers", {
+            "first_name": "Frau Meyer", "username": "meyer", "class_ids": [klass["id"]]
+        })
+        self.client.request("POST", "/api/logout", {})
+
+        wrong_role = Client(self.app)
+        status, _, _ = wrong_role.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "verwaltung", "password": "sicheres-testkennwort"
+        })
+        self.assertEqual(status, 401)
+        status, _, _ = wrong_role.request("POST", "/api/login", {
+            "login_type": "admin", "username": student["username"], "password": student["access_code"]
+        })
+        self.assertEqual(status, 401)
+
+        admin_client = Client(self.app)
+        status, _, _ = admin_client.request("POST", "/api/login", {
+            "login_type": "admin", "username": "verwaltung", "password": "sicheres-testkennwort"
+        })
+        self.assertEqual(status, 200)
+        _, admin_bootstrap, _ = admin_client.request("GET", "/api/bootstrap")
+        self.assertEqual(admin_bootstrap["user"]["is_owner"], 1)
+
+        teacher_client = Client(self.app)
+        status, _, _ = teacher_client.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "meyer", "password": teacher["initial_password"]
+        })
+        self.assertEqual(status, 200)
+
+        student_client = Client(self.app)
+        status, _, _ = student_client.request("POST", "/api/login", {
+            "login_type": "student", "username": student["username"], "password": student["access_code"]
+        })
+        self.assertEqual(status, 200)
 
     def test_owner_assigns_teacher_to_classes_and_scope_is_enforced(self):
         self.client.request("POST", "/api/setup", {

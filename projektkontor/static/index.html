@@ -17,18 +17,24 @@
       <h1 id="login-heading">ProjektKontor</h1>
       <p id="auth-intro">Projekte planen, Verantwortung übernehmen, zusammenarbeiten.</p>
       <form id="login-form" class="stack">
+        <fieldset class="login-role-choice">
+          <legend>Anmelden als</legend>
+          <label><input type="radio" name="login_type" value="student" checked><span>Schüler</span></label>
+          <label><input type="radio" name="login_type" value="teacher"><span>Lehrkraft</span></label>
+          <label><input type="radio" name="login_type" value="admin"><span>Admin</span></label>
+        </fieldset>
         <label>Benutzername<input name="username" autocomplete="username" placeholder="z. B. vorname01" required></label>
-        <label>Kennwort oder Zugangscode<input name="password" type="password" autocomplete="current-password" required></label>
+        <label><span id="login-secret-label">Zugangscode</span><input name="password" type="password" autocomplete="current-password" required></label>
         <button class="button primary" type="submit">Anmelden</button>
-        <button class="text-button auth-switch hidden" id="show-setup" type="button">Erstmalige Geschäftsführung einrichten</button>
+        <button class="text-button auth-switch hidden" id="show-setup" type="button">Admin-Ersteinrichtung</button>
       </form>
       <form id="setup-form" class="stack hidden">
-        <div class="info-box">Richten Sie einmalig das Konto der Geschäftsführung ein.</div>
+        <div class="info-box">Richten Sie einmalig das Administrationskonto ein. Lehrkraft- und Schülerkonten werden später ausschließlich durch den Admin angelegt.</div>
         <label>Ihr Vorname<input name="first_name" required></label>
-        <label>Benutzername<input name="username" value="lehrkraft" required></label>
+        <label>Admin-Benutzername<input name="username" value="admin" required></label>
         <label>Kennwort<input name="password" type="password" minlength="10" required></label>
-        <button class="button primary" type="submit">ProjektKontor einrichten</button>
-        <button class="text-button auth-switch" id="show-login" type="button">Zum Login für Lehrkräfte und Lernende</button>
+        <button class="button primary" type="submit">Admin einrichten</button>
+        <button class="text-button auth-switch" id="show-login" type="button">Zurück zum Login</button>
       </form>
       <div class="auth-legal"><button type="button" class="text-button privacy-link">Datenschutzinformation</button><a class="text-button" href="/impressum">Impressum</a></div>
     </section>
