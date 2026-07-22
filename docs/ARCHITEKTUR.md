@@ -14,7 +14,8 @@ Betrieb bewusst überschaubar und vermeidet doppelte Datenhaltung.
 - **Dateien:** geschützter Datenordner außerhalb des Webverzeichnisses
 - **Excel:** OpenPyXL
 - **PDF:** ReportLab
-- **HTTPS:** Caddy mit automatischer Zertifikatsverwaltung
+- **HTTPS:** vorgeschalteter Reverse Proxy mit automatischer
+  Zertifikatsverwaltung
 
 SQLite genügt für den beschriebenen MVP mit einer gleichzeitig aktiven Klasse.
 Bei deutlich höherer Parallelität sollte vor einer Ausweitung auf mehrere

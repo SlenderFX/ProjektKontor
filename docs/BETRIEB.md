@@ -4,7 +4,8 @@
 
 Eine Subdomain der Schule ist sinnvoll, beispielsweise
 `projektkontor.org`. Der DNS-Eintrag muss auf den gemieteten Server
-zeigen. Caddy beschafft und erneuert anschließend das TLS-Zertifikat.
+zeigen. Der vorgeschaltete Reverse Proxy übernimmt HTTPS und die automatische
+Erneuerung des TLS-Zertifikats.
 
 ## Installation mit Docker Compose
 

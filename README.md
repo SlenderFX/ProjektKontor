@@ -37,16 +37,17 @@ Python verwendet werden, sofern die Abhängigkeiten dort vorhanden sind.
 | `PK_SECRET_KEY` | automatisch lokal erzeugt | Sitzungen und Zugangscode-Verschlüsselung |
 | `PK_MAX_UPLOAD_MB` | `25` | Maximale Dateigröße |
 | `PK_COOKIE_SECURE` | `0` lokal, auf Server `1` | Sitzungscookie nur über HTTPS |
-| `PK_TRUST_PROXY` | `0` lokal, in Docker `1` | Clientadresse ausschließlich hinter dem mitgelieferten Caddy auswerten |
+| `PK_TRUST_PROXY` | `0` lokal, in Docker `1` | Weitergeleitete Clientadresse ausschließlich hinter einem vertrauenswürdigen Reverse Proxy auswerten |
 | `PK_PRIVACY_CONTROLLER_*` | lokale Platzhalter | Verantwortlicher, Anschrift, Kontakt und Datenschutzbeauftragte für die Datenschutzinformation |
 | `PK_PRIVACY_LEGAL_BASIS` | lokaler Platzhalter | Von Schule oder Schulträger bestätigte Rechtsgrundlage |
 | `PK_CONTACT_RECIPIENT` | private Empfängeradresse | Nur serverseitiges Ziel des Kontaktformulars; wird nicht an den Browser ausgeliefert |
 | `PK_SMTP_*` | nicht gesetzt | Mailserver, Port, Benutzername, Passwort, Absender und SSL für den Formularversand |
 | `PK_TURNSTILE_SITEKEY`, `PK_TURNSTILE_SECRET` | lokale Testschlüssel | Cloudflare-Turnstile-Schlüssel für die Menschprüfung; produktiv zwingend ersetzen |
 
-Auf einem Server müssen HTTPS, Reverse Proxy, automatisierte Backups und ein
-separater Sicherungsort verwendet werden. `compose.yaml` enthält dafür eine
-Startkonfiguration mit Caddy und täglicher 14-Tage-Backuprotation.
+Auf einem Server müssen HTTPS, ein vertrauenswürdiger Reverse Proxy,
+automatisierte Backups und ein separater Sicherungsort verwendet werden.
+`compose.yaml` bindet ProjektKontor dafür an das externe Docker-Netzwerk
+`proxy` an und enthält eine tägliche 14-Tage-Backuprotation.
 
 Das öffentliche Kontaktformular schützt den Versand durch Cloudflare Turnstile,
 ein Bot-Fangfeld und eine Begrenzung auf fünf Anfragen je IP-Adresse und Stunde.

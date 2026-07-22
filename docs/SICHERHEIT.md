@@ -37,8 +37,8 @@ Stand: 16. Juli 2026
   sein.
 - `PK_SECRET_KEY` wird bewusst nicht in das normale Datenbackup aufgenommen.
   Die `.env`-Datei muss getrennt und sicher gesichert werden.
-- Betriebssystem, Caddy, Docker und Python-Abhängigkeiten benötigen weiterhin
-  regelmäßige Sicherheitsupdates.
+- Betriebssystem, Reverse Proxy, Docker und Python-Abhängigkeiten benötigen
+  weiterhin regelmäßige Sicherheitsupdates.
 - Die Prüfung ersetzt keinen externen Penetrationstest und keine schulische
   Datenschutz- oder Freigabeprüfung.
 - Bei einem Betrieb im Heimnetz bleiben Routerkonfiguration, Firewall,
