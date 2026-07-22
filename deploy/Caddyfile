@@ -1,0 +1,18 @@
+{$PROJECTKONTOR_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy app:8080
+    @protected path /api/*
+    header @protected X-Robots-Tag "noindex, nofollow, noarchive, nosnippet"
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Cross-Origin-Opener-Policy "same-origin"
+        Cross-Origin-Resource-Policy "same-origin"
+        X-Permitted-Cross-Domain-Policies "none"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' https://challenges.cloudflare.com 'sha256-l4xERraYJGTAs+NV2Zvk1GpNQGWjQE2ABVdPYAQaJFU='; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests"
+    }
+}

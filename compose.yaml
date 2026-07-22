@@ -1,0 +1,81 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      PK_DATA_DIR: /data
+      PK_SECRET_KEY: ${PK_SECRET_KEY:?Bitte in .env festlegen}
+      PK_COOKIE_SECURE: "1"
+      PK_TRUST_PROXY: "1"
+      PK_PRIVACY_CONTROLLER_NAME: ${PK_PRIVACY_CONTROLLER_NAME:?Verantwortlichen in .env festlegen}
+      PK_PRIVACY_CONTROLLER_ADDRESS: ${PK_PRIVACY_CONTROLLER_ADDRESS:?Anschrift in .env festlegen}
+      PK_PRIVACY_CONTROLLER_EMAIL: ${PK_PRIVACY_CONTROLLER_EMAIL:?Kontaktadresse in .env festlegen}
+      PK_PRIVACY_DPO_CONTACT: ${PK_PRIVACY_DPO_CONTACT:-Über den Verantwortlichen erreichbar}
+      PK_PRIVACY_LEGAL_BASIS: ${PK_PRIVACY_LEGAL_BASIS:?Rechtsgrundlage in .env festlegen}
+      PK_CONTACT_RECIPIENT: ${PK_CONTACT_RECIPIENT:?Private Empfängeradresse in .env festlegen}
+      PK_SMTP_HOST: ${PK_SMTP_HOST:?SMTP-Server in .env festlegen}
+      PK_SMTP_PORT: ${PK_SMTP_PORT:-465}
+      PK_SMTP_USERNAME: ${PK_SMTP_USERNAME:?SMTP-Benutzername in .env festlegen}
+      PK_SMTP_PASSWORD: ${PK_SMTP_PASSWORD:?SMTP-Passwort in .env festlegen}
+      PK_SMTP_SENDER: ${PK_SMTP_SENDER:?Absenderadresse in .env festlegen}
+      PK_SMTP_USE_SSL: ${PK_SMTP_USE_SSL:-1}
+      PK_TURNSTILE_SITEKEY: ${PK_TURNSTILE_SITEKEY:?Turnstile-Sitekey in .env festlegen}
+      PK_TURNSTILE_SECRET: ${PK_TURNSTILE_SECRET:?Turnstile-Secret in .env festlegen}
+    volumes:
+      - projektkontor_data:/data
+    expose:
+      - "8080"
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2.11.3-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PROJECTKONTOR_DOMAIN: ${PROJECTKONTOR_DOMAIN:?Bitte in .env festlegen}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  backup:
+    build: .
+    restart: unless-stopped
+    user: "10001:10001"
+    environment:
+      PK_DATA_DIR: /data
+      PK_BACKUP_DIR: /backups
+      PK_BACKUP_RETENTION_DAYS: 14
+    volumes:
+      - projektkontor_data:/data:ro
+      - ${PROJECTKONTOR_BACKUP_DIR:-./backups}:/backups
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["while true; do python -m projektkontor.backup; sleep 86400; done"]
+
+volumes:
+  projektkontor_data:
+  caddy_data:
+  caddy_config:

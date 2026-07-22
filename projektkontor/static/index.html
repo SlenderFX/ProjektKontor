@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0F2E5D">
+  <meta name="robots" content="noindex,nofollow,noarchive,nosnippet">
+  <title>ProjektKontor</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <main id="auth" class="auth-shell hidden">
+    <section class="auth-card">
+      <img src="/projektkontor-logo.png" class="auth-logo" alt="ProjektKontor">
+      <h1 id="login-heading">ProjektKontor</h1>
+      <p id="auth-intro">Projekte planen, Verantwortung übernehmen, zusammenarbeiten.</p>
+      <form id="login-form" class="stack">
+        <label>Benutzername<input name="username" autocomplete="username" placeholder="z. B. vorname01" required></label>
+        <label>Kennwort oder Zugangscode<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="button primary" type="submit">Anmelden</button>
+      </form>
+      <form id="setup-form" class="stack hidden">
+        <div class="info-box">Richten Sie einmalig das Konto der Geschäftsführung ein.</div>
+        <label>Ihr Vorname<input name="first_name" required></label>
+        <label>Benutzername<input name="username" value="lehrkraft" required></label>
+        <label>Kennwort<input name="password" type="password" minlength="10" required></label>
+        <button class="button primary" type="submit">ProjektKontor einrichten</button>
+      </form>
+      <div class="auth-legal"><button type="button" class="text-button privacy-link">Datenschutzinformation</button><a class="text-button" href="/impressum">Impressum</a></div>
+    </section>
+  </main>
+
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <a class="brand" href="#/">
+        <img src="/projektkontor-logo.png" alt="">
+        <span>ProjektKontor</span>
+      </a>
+      <nav id="nav">
+        <a href="#/" data-route="home"><span>⌂</span>Start</a>
+        <a href="#/tasks" data-route="tasks"><span>✓</span>Meine Aufgaben</a>
+        <a href="#/projects" data-route="projects"><span>▦</span>Projekte</a>
+        <a href="#/notifications" data-route="notifications"><span>●</span>Hinweise <b id="notification-count" class="badge hidden">0</b></a>
+        <a href="#/admin" data-route="admin" class="teacher-only"><span>⚙</span>Verwaltung</a>
+      </nav>
+      <div class="sidebar-footer">
+        <div><strong id="current-name"></strong><small id="current-role"></small><button type="button" class="text-button privacy-link">Datenschutz</button></div>
+        <button id="logout" class="text-button">Abmelden</button>
+      </div>
+    </aside>
+    <section class="main-shell">
+      <header class="topbar">
+        <button id="menu-toggle" class="icon-button" aria-label="Menü öffnen">☰</button>
+        <div id="breadcrumbs"></div>
+        <button id="quick-notifications" class="icon-button" aria-label="Hinweise">●</button>
+      </header>
+      <main id="content" class="content" tabindex="-1"></main>
+    </section>
+  </div>
+
+  <dialog id="dialog">
+    <div class="dialog-card">
+      <header><h2 id="dialog-title"></h2><button id="dialog-close" type="button" class="icon-button" aria-label="Schließen">×</button></header>
+      <div id="dialog-body"></div>
+      <footer id="dialog-actions"></footer>
+    </div>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

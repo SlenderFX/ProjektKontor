@@ -1,0 +1,5 @@
+cryptography>=46.0.7,<50
+openpyxl>=3.1,<4
+reportlab>=4.4,<5
+gunicorn>=26,<27
+Pillow>=12.3,<13
