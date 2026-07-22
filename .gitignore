@@ -1,6 +1,17 @@
+.env
+.env.*
+!.env.example
+
 __pycache__/
 *.py[cod]
 .venv/
-data/
-.DS_Store
 
+data/
+
+backups/
+outputs/
+
+.vscode/
+.idea/
+
+.DS_Store
