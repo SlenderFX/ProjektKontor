@@ -122,3 +122,6 @@ Weitere Dokumente:
 - Das Kontaktformular anschließend mit einer echten Anfrage prüfen: Eingang an
   der privaten Empfängeradresse, Betreffpräfix `ProjektKontor Anfrage:`,
   Antwortadresse sowie Fehler- und Missbrauchsschutz kontrollieren.
+- Zum Ende eines Beta-Testzugangs automatisch eine Feedbackanfrage per E-Mail
+  versenden. Diese Nachricht ist fachlich vorgesehen, aber noch nicht
+  eingerichtet.

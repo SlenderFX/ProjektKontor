@@ -98,7 +98,16 @@ try{betaPopupSeen=sessionStorage.getItem(betaPopupKey)==='true'}catch(error){}
 if(betaDialog&&!betaPopupSeen){
   window.setTimeout(()=>{
     if(!betaDialog.open){
+      const scrollPosition={left:window.scrollX,top:window.scrollY};
+      const root=document.documentElement;
+      const previousScrollBehavior=root.style.scrollBehavior;
       betaDialog.showModal();
+      root.style.scrollBehavior='auto';
+      window.scrollTo(scrollPosition);
+      requestAnimationFrame(()=>{
+        window.scrollTo(scrollPosition);
+        root.style.scrollBehavior=previousScrollBehavior;
+      });
       rememberBetaPopup();
     }
   },15000);

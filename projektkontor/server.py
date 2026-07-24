@@ -971,6 +971,13 @@ class App:
         payment_status = str(data.get("payment_status", current["payment_status"] if current else ("not_required" if plan == "beta" else "open"))).strip()
         if status not in LICENSE_STATUSES or payment_status not in PAYMENT_STATUSES:
             raise HttpError(400, "Lizenz- oder Zahlungsstatus ist ungültig.")
+        if plan == "beta":
+            beta_end = (datetime.fromisoformat(starts_on).date() + timedelta(days=27)).isoformat()
+            if ends_on > beta_end:
+                raise HttpError(400, "Ein Beta-Testzugang darf höchstens vier Wochen gültig sein.")
+            if amount_cents != 0:
+                raise HttpError(400, "Ein Beta-Testzugang muss kostenfrei sein.")
+            payment_status = "not_required"
         today = datetime.now(timezone.utc).date().isoformat()
         if status == "active" and ends_on < today:
             status = "expired"

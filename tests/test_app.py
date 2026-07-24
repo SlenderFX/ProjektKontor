@@ -7,6 +7,7 @@ import os
 import tarfile
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -86,8 +87,8 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         status, _, _ = client.request("POST", "/api/licenses", {
             "customer_name": "Testlizenz", "organization": "Testschule",
-            "plan": "beta", "seat_limit": 1, "amount_cents": 0,
-            "payment_status": "not_required", "status": "active",
+            "plan": "single", "seat_limit": 1, "amount_cents": 7900,
+            "payment_status": "paid", "status": "active",
             "starts_on": "2020-01-01", "ends_on": "2099-12-31",
             "teacher_ids": [teacher["id"]],
         })
@@ -550,6 +551,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(result["user"]["username"], "lehrkraft_neu")
 
     def test_admin_manages_paid_licenses_and_license_access(self):
+        today = date.today()
         admin = Client(self.app)
         status, _, _ = admin.request("POST", "/api/setup", {
             "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
@@ -571,6 +573,15 @@ class AppFlowTest(unittest.TestCase):
         })
         self.assertEqual(status, 400)
         self.assertIn("höchstens 1", rejected["error"])
+
+        status, rejected, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Beta-Test", "plan": "beta", "seat_limit": 1,
+            "amount_cents": 0, "payment_status": "not_required", "status": "active",
+            "starts_on": today.isoformat(), "ends_on": (today + timedelta(days=28)).isoformat(),
+            "teacher_ids": [first["id"]],
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("höchstens vier Wochen", rejected["error"])
 
         status, license_record, _ = admin.request("POST", "/api/licenses", {
             "customer_name": "Frau Beispiel", "organization": "Beispiel-BK",
@@ -613,6 +624,26 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("keine aktive Lizenz", denied["error"])
         self.assertEqual(self.app.db.one("SELECT active FROM users WHERE id=?", (first["id"],))["active"], 1)
+
+        status, _, _ = admin.request("PATCH", f"/api/licenses/{license_record['id']}", {
+            "status": "active",
+        })
+        self.assertEqual(status, 200)
+        status, _, _ = teacher.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "lehrkraft_erika", "password": TEST_TEACHER_PASSWORD
+        })
+        self.assertEqual(status, 200)
+        self.app.db.execute(
+            "UPDATE licenses SET starts_on=?,ends_on=?,status='active' WHERE id=?",
+            ("2020-01-01", (today - timedelta(days=1)).isoformat(), license_record["id"]),
+        )
+        status, bootstrap, _ = teacher.request("GET", "/api/bootstrap")
+        self.assertEqual(status, 200)
+        self.assertIsNone(bootstrap["user"])
+        self.assertEqual(
+            self.app.db.one("SELECT status FROM licenses WHERE id=?", (license_record["id"],))["status"],
+            "expired",
+        )
 
     def test_security_headers_and_malformed_image_rejection(self):
         status, _, headers = self.client.request("GET", "/api/health")
@@ -663,11 +694,17 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"vollst\xc3\xa4ndige Handlung", landing)
         self.assertIn(b"Betriebliche Rollen statt beliebiger Gruppen", landing)
         self.assertIn(b"Geplante Einf\xc3\xbchrungspreise", landing)
+        self.assertIn(b"8,90 \xe2\x82\xac", landing)
+        self.assertIn(b"pro Monat", landing)
+        self.assertIn(b"79 \xe2\x82\xac pro Jahr", landing)
+        self.assertIn(b"Monatlich oder j\xc3\xa4hrlich buchbar", landing)
         self.assertIn(b"79 \xe2\x82\xac", landing)
         self.assertIn(b"299 \xe2\x82\xac", landing)
         self.assertIn(b"ab 599 \xe2\x82\xac", landing)
         self.assertIn(b'id="beta-dialog"', landing)
         self.assertIn(b"begrenzte Anzahl kostenfreier Beta-Testzug\xc3\xa4nge", landing)
+        self.assertIn(b"4 Wochen kostenfrei testen", landing)
+        self.assertNotIn(b"6\xe2\x80\x938 Wochen", landing)
         self.assertIn(b"Nachhaltige Sch\xc3\xbclerfirma", landing)
         self.assertIn(b"Vom Projektauftrag bis zum gesicherten Ergebnis", landing)
         self.assertIn(b"VPS in Deutschland", landing)
@@ -690,7 +727,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b'id="login-form"', login)
         self.assertIn(b'href="/">', login)
-        self.assertIn(b"Zur ProjektKontor-Produktseite", login)
+        self.assertIn(b"Zur Startseite", login)
         self.assertIn(b'content="noindex,nofollow,noarchive,nosnippet"', login)
         status, sitemap, _ = self.client.request("GET", "/sitemap.xml")
         self.assertEqual(status, 200)
@@ -716,6 +753,8 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"projektkontor-beta-popup-seen", landing_script)
         self.assertIn(b"15000", landing_script)
         self.assertIn(b"Kostenloser Beta-Testzugang", landing_script)
+        self.assertIn(b"scrollPosition", landing_script)
+        self.assertIn(b"previousScrollBehavior", landing_script)
 
     def test_contact_form_is_human_checked_and_recipient_stays_server_side(self):
         payload = {
@@ -853,8 +892,8 @@ class AppFlowTest(unittest.TestCase):
             "first_name": "Frau Meyer", "username": "lehrkraft_meyer"
         })
         status, _, _ = self.client.request("POST", "/api/licenses", {
-            "customer_name": "Testlizenz", "plan": "beta", "seat_limit": 1,
-            "amount_cents": 0, "payment_status": "not_required", "status": "active",
+            "customer_name": "Testlizenz", "plan": "single", "seat_limit": 1,
+            "amount_cents": 7900, "payment_status": "paid", "status": "active",
             "starts_on": "2020-01-01", "ends_on": "2099-12-31",
             "teacher_ids": [teacher["id"]],
         })
@@ -961,8 +1000,8 @@ class AppFlowTest(unittest.TestCase):
         })
         self.assertEqual(status, 200)
         status, _, _ = admin.request("POST", "/api/licenses", {
-            "customer_name": "Testlizenz", "plan": "beta", "seat_limit": 1,
-            "amount_cents": 0, "payment_status": "not_required", "status": "active",
+            "customer_name": "Testlizenz", "plan": "single", "seat_limit": 1,
+            "amount_cents": 7900, "payment_status": "paid", "status": "active",
             "starts_on": "2020-01-01", "ends_on": "2099-12-31",
             "teacher_ids": [teacher["id"]],
         })

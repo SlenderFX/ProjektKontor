@@ -329,7 +329,7 @@ async function renderAllUsers(classes){
 function euro(cents){return new Intl.NumberFormat('de-DE',{style:'currency',currency:'EUR'}).format((Number(cents)||0)/100)}
 function defaultLicenseDates(plan='single'){
   const start=new Date(),end=new Date(start);
-  if(plan==='beta')end.setDate(end.getDate()+55);
+  if(plan==='beta')end.setDate(end.getDate()+27);
   else{end.setFullYear(end.getFullYear()+1);end.setDate(end.getDate()-1)}
   return {starts_on:start.toISOString().slice(0,10),ends_on:end.toISOString().slice(0,10)};
 }
