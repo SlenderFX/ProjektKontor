@@ -582,7 +582,16 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"Pr\xc3\xbcfstatus", landing)
         self.assertIn(b"Der Projektbericht", landing)
         self.assertIn(b"Produkteinblick", landing)
-        self.assertIn(b'href="#funktionsweise">Produktprinzip</a>', landing)
+        self.assertIn(b'href="#vorteile">Vorteile</a>', landing)
+        self.assertIn(b"Der entscheidende Unterschied", landing)
+        self.assertIn(b"vollst\xc3\xa4ndige Handlung", landing)
+        self.assertIn(b"Betriebliche Rollen statt beliebiger Gruppen", landing)
+        self.assertIn(b"Geplante Einf\xc3\xbchrungspreise", landing)
+        self.assertIn(b"79 \xe2\x82\xac", landing)
+        self.assertIn(b"299 \xe2\x82\xac", landing)
+        self.assertIn(b"ab 599 \xe2\x82\xac", landing)
+        self.assertIn(b'id="beta-dialog"', landing)
+        self.assertIn(b"begrenzte Anzahl kostenfreier Beta-Testzug\xc3\xa4nge", landing)
         self.assertIn(b"Nachhaltige Sch\xc3\xbclerfirma", landing)
         self.assertIn(b"Vom Projektauftrag bis zum gesicherten Ergebnis", landing)
         self.assertIn(b"VPS in Deutschland", landing)
@@ -626,6 +635,9 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"largestVisibleArea", landing_script)
         self.assertIn(b"visibleArea", landing_script)
         self.assertIn(b"history.pushState", landing_script)
+        self.assertIn(b"projektkontor-beta-popup-seen", landing_script)
+        self.assertIn(b"15000", landing_script)
+        self.assertIn(b"Kostenloser Beta-Testzugang", landing_script)
 
     def test_contact_form_is_human_checked_and_recipient_stays_server_side(self):
         payload = {

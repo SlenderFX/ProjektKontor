@@ -59,6 +59,51 @@ const contactButton=contactForm.querySelector('button[type="submit"]');
 const turnstileContainer=document.querySelector('#turnstile-container');
 contactButton.disabled=true;
 
+const betaDialog=document.querySelector('#beta-dialog');
+const betaDialogClose=betaDialog?.querySelector('.beta-dialog-close');
+const betaDialogLater=betaDialog?.querySelector('.beta-dialog-later');
+const betaContactLinks=document.querySelectorAll('.beta-contact-link');
+const betaPopupKey='projektkontor-beta-popup-seen';
+function rememberBetaPopup(){
+  try{sessionStorage.setItem(betaPopupKey,'true')}catch(error){}
+}
+function closeBetaDialog(){
+  if(betaDialog?.open)betaDialog.close();
+  rememberBetaPopup();
+}
+function openPreparedContact(subjectText,messageText){
+  const subject=contactForm.elements.namedItem('subject');
+  const message=contactForm.elements.namedItem('message');
+  if(subject)subject.value=subjectText;
+  if(message&&!message.value.trim())message.value=messageText;
+  history.pushState(null,'','#kontakt');
+  centerSection(document.querySelector('#kontakt'));
+}
+function prepareBetaRequest(event){
+  event.preventDefault();
+  closeBetaDialog();
+  openPreparedContact('Kostenloser Beta-Testzugang','Ich interessiere mich für einen kostenfreien Beta-Testzugang für ProjektKontor.');
+}
+betaContactLinks.forEach(link=>link.addEventListener('click',prepareBetaRequest));
+document.querySelectorAll('.contact-prefill-link').forEach(link=>link.addEventListener('click',event=>{
+  event.preventDefault();
+  openPreparedContact(link.dataset.subject||'Interesse an ProjektKontor',link.dataset.message||'Ich interessiere mich für ProjektKontor.');
+}));
+betaDialogClose?.addEventListener('click',closeBetaDialog);
+betaDialogLater?.addEventListener('click',closeBetaDialog);
+betaDialog?.addEventListener('cancel',rememberBetaPopup);
+betaDialog?.addEventListener('click',event=>{if(event.target===betaDialog)closeBetaDialog()});
+let betaPopupSeen=false;
+try{betaPopupSeen=sessionStorage.getItem(betaPopupKey)==='true'}catch(error){}
+if(betaDialog&&!betaPopupSeen){
+  window.setTimeout(()=>{
+    if(!betaDialog.open){
+      betaDialog.showModal();
+      rememberBetaPopup();
+    }
+  },15000);
+}
+
 async function prepareHumanCheck(){
   try{
     const response=await fetch('/api/contact/config',{headers:{Accept:'application/json'}});
