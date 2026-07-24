@@ -10,7 +10,7 @@ from xml.sax.saxutils import escape
 
 from openpyxl import Workbook, load_workbook
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
@@ -26,6 +26,181 @@ LIGHT = colors.HexColor("#E6E9ED")
 
 def safe_paragraph(value: Any) -> str:
     return escape(str(value or "")).replace("\n", "<br/>")
+
+
+def money(cents: int) -> str:
+    return f"{cents / 100:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") + " EUR"
+
+
+def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
+    """Create an immutable, printable invoice from a database snapshot."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=20 * mm,
+        leftMargin=20 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title=f"Rechnung {invoice['invoice_number']}",
+        author=invoice["issuer_name"],
+    )
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="InvoiceBrand", parent=styles["Heading1"], fontSize=19, leading=22,
+        textColor=NAVY, spaceAfter=1 * mm,
+    ))
+    styles.add(ParagraphStyle(
+        name="InvoiceRight", parent=styles["BodyText"], alignment=TA_RIGHT,
+        fontSize=8.5, leading=11, textColor=colors.HexColor("#475467"),
+    ))
+    styles.add(ParagraphStyle(
+        name="InvoiceSmall", parent=styles["BodyText"], fontSize=8, leading=10,
+        textColor=colors.HexColor("#667085"),
+    ))
+    styles.add(ParagraphStyle(
+        name="InvoiceTotal", parent=styles["BodyText"], fontSize=11, leading=14,
+        textColor=NAVY, alignment=TA_RIGHT,
+    ))
+
+    issuer_lines = invoice["issuer_name"]
+    if invoice.get("issuer_proprietor"):
+        issuer_lines += f"<br/>{safe_paragraph(invoice['issuer_proprietor'])}"
+    issuer_lines += f"<br/>{safe_paragraph(invoice['issuer_address'])}"
+    if invoice.get("issuer_email"):
+        issuer_lines += f"<br/>{safe_paragraph(invoice['issuer_email'])}"
+    header = Table([
+        [
+            Paragraph("PRIME<span color='#6F8B74'>Advisory</span>", styles["InvoiceBrand"]),
+            Paragraph(issuer_lines, styles["InvoiceRight"]),
+        ],
+        [
+            Paragraph("Rechnung für ProjektKontor", styles["InvoiceSmall"]),
+            "",
+        ],
+    ], colWidths=[92 * mm, 78 * mm])
+    header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("LINEBELOW", (0, 1), (-1, 1), 1.2, SAGE),
+        ("BOTTOMPADDING", (0, 1), (-1, 1), 6 * mm),
+    ]))
+
+    recipient = invoice.get("organization", "").strip()
+    if recipient:
+        recipient += "<br/>"
+    recipient += safe_paragraph(invoice["customer_name"])
+    recipient += "<br/>" + safe_paragraph(invoice["billing_address"])
+    details = [
+        ["Rechnungsnummer", invoice["invoice_number"]],
+        ["Rechnungsdatum", datetime.fromisoformat(invoice["issued_on"]).strftime("%d.%m.%Y")],
+        ["Leistungsdatum", datetime.fromisoformat(invoice["service_on"]).strftime("%d.%m.%Y")],
+        ["Zahlbar bis", datetime.fromisoformat(invoice["due_on"]).strftime("%d.%m.%Y")],
+    ]
+    if invoice.get("invoice_reference"):
+        details.append(["Referenz", invoice["invoice_reference"]])
+    detail_table = Table(details, colWidths=[30 * mm, 45 * mm])
+    detail_table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("TEXTCOLOR", (0, 0), (0, -1), NAVY),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    address_block = Table([
+        [Paragraph("<b>Rechnung an</b><br/>" + recipient, styles["BodyText"]), detail_table]
+    ], colWidths=[95 * mm, 75 * mm])
+    address_block.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+    ]))
+
+    item_rows = [
+        [
+            Paragraph("<b>Leistung</b>", styles["InvoiceSmall"]),
+            Paragraph("<b>Zeitraum</b>", styles["InvoiceSmall"]),
+            Paragraph("<b>Betrag</b>", styles["InvoiceSmall"]),
+        ],
+        [
+            Paragraph(safe_paragraph(invoice["description"]), styles["BodyText"]),
+            Paragraph(
+                f"{datetime.fromisoformat(invoice['license_starts_on']).strftime('%d.%m.%Y')} bis "
+                f"{datetime.fromisoformat(invoice['license_ends_on']).strftime('%d.%m.%Y')}",
+                styles["InvoiceSmall"],
+            ),
+            Paragraph(money(invoice["net_cents"]), styles["InvoiceRight"]),
+        ],
+    ]
+    items = Table(item_rows, colWidths=[90 * mm, 45 * mm, 35 * mm], repeatRows=1)
+    items.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), LIGHT),
+        ("TEXTCOLOR", (0, 0), (-1, 0), NAVY),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.6, SAGE),
+        ("LINEBELOW", (0, 1), (-1, 1), 0.4, LIGHT),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (2, 0), (2, -1), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    totals_rows = [["Zwischensumme", money(invoice["net_cents"])]]
+    if invoice["vat_cents"]:
+        totals_rows.append([
+            f"Umsatzsteuer {invoice['vat_rate_basis_points'] / 100:.0f} %",
+            money(invoice["vat_cents"]),
+        ])
+    totals_rows.append(["Gesamtbetrag", money(invoice["gross_cents"])])
+    totals = Table(totals_rows, colWidths=[45 * mm, 35 * mm], hAlign="RIGHT")
+    totals.setStyle(TableStyle([
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("TEXTCOLOR", (0, -1), (-1, -1), NAVY),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, -1), (-1, -1), 11),
+        ("LINEABOVE", (0, -1), (-1, -1), 1.2, NAVY),
+        ("TOPPADDING", (0, -1), (-1, -1), 7),
+    ]))
+
+    payment_parts = [
+        f"Bitte zahlen Sie den Gesamtbetrag bis zum {datetime.fromisoformat(invoice['due_on']).strftime('%d.%m.%Y')} "
+        f"unter Angabe der Rechnungsnummer {safe_paragraph(invoice['invoice_number'])}.",
+    ]
+    if invoice.get("iban"):
+        payment_parts.append(f"IBAN: {safe_paragraph(invoice['iban'])}")
+    if invoice.get("bic"):
+        payment_parts.append(f"BIC: {safe_paragraph(invoice['bic'])}")
+    if invoice.get("bank_name"):
+        payment_parts.append(f"Bank: {safe_paragraph(invoice['bank_name'])}")
+
+    footer_text = (
+        f"{safe_paragraph(invoice['issuer_name'])}"
+        + (f" · {safe_paragraph(invoice['issuer_proprietor'])}" if invoice.get("issuer_proprietor") else "")
+        + f" · {safe_paragraph(invoice['issuer_address']).replace('<br/>', ' · ')}"
+        + f"<br/>Steuerliche Kennung: {safe_paragraph(invoice['issuer_tax_identifier'])}"
+    )
+    story: list[Any] = [
+        header,
+        Spacer(1, 9 * mm),
+        address_block,
+        Spacer(1, 12 * mm),
+        Paragraph("Rechnung", styles["Title"]),
+        Paragraph(
+            "Vielen Dank für Ihr Vertrauen in ProjektKontor. Wir berechnen die folgende Leistung:",
+            styles["BodyText"],
+        ),
+        Spacer(1, 7 * mm),
+        items,
+        Spacer(1, 6 * mm),
+        totals,
+        Spacer(1, 8 * mm),
+    ]
+    if invoice.get("tax_note"):
+        story += [Paragraph(safe_paragraph(invoice["tax_note"]), styles["InvoiceSmall"]), Spacer(1, 5 * mm)]
+    story += [
+        Paragraph("<br/>".join(payment_parts), styles["BodyText"]),
+        Spacer(1, 15 * mm),
+        Paragraph(footer_text, styles["InvoiceSmall"]),
+    ]
+    doc.build(story)
+    return buffer.getvalue()
 
 
 def report_date(value: str, include_time: bool) -> str:

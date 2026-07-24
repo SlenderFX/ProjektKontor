@@ -306,6 +306,7 @@ CREATE TABLE IF NOT EXISTS license_orders (
     billing_address TEXT NOT NULL DEFAULT '',
     invoice_reference TEXT NOT NULL DEFAULT '',
     plan TEXT NOT NULL CHECK(plan IN ('beta','single','department','school')),
+    billing_cycle TEXT NOT NULL DEFAULT 'annual' CHECK(billing_cycle IN ('none','monthly','annual')),
     amount_cents INTEGER NOT NULL DEFAULT 0 CHECK(amount_cents >= 0),
     payment_status TEXT NOT NULL DEFAULT 'open' CHECK(payment_status IN ('not_required','open','paid','overdue','refunded','cancelled')),
     notes TEXT NOT NULL DEFAULT '',
@@ -331,6 +332,55 @@ CREATE TABLE IF NOT EXISTS license_teachers (
     PRIMARY KEY(license_id, teacher_id)
 );
 
+CREATE TABLE IF NOT EXISTS invoice_settings (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    business_name TEXT NOT NULL,
+    proprietor_name TEXT NOT NULL DEFAULT '',
+    address TEXT NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
+    tax_identifier TEXT NOT NULL,
+    tax_mode TEXT NOT NULL DEFAULT 'small_business' CHECK(tax_mode IN ('small_business','standard')),
+    vat_rate_basis_points INTEGER NOT NULL DEFAULT 1900 CHECK(vat_rate_basis_points BETWEEN 0 AND 10000),
+    invoice_prefix TEXT NOT NULL DEFAULT 'PK',
+    next_invoice_number INTEGER NOT NULL DEFAULT 1 CHECK(next_invoice_number >= 1),
+    payment_terms_days INTEGER NOT NULL DEFAULT 14 CHECK(payment_terms_days BETWEEN 0 AND 365),
+    iban TEXT NOT NULL DEFAULT '',
+    bic TEXT NOT NULL DEFAULT '',
+    bank_name TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS invoices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    license_id INTEGER NOT NULL UNIQUE REFERENCES licenses(id) ON DELETE RESTRICT,
+    invoice_number TEXT NOT NULL UNIQUE,
+    issued_on TEXT NOT NULL,
+    service_on TEXT NOT NULL,
+    due_on TEXT NOT NULL,
+    customer_name TEXT NOT NULL,
+    organization TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    billing_address TEXT NOT NULL,
+    invoice_reference TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL,
+    net_cents INTEGER NOT NULL,
+    vat_rate_basis_points INTEGER NOT NULL DEFAULT 0,
+    vat_cents INTEGER NOT NULL DEFAULT 0,
+    gross_cents INTEGER NOT NULL,
+    issuer_name TEXT NOT NULL,
+    issuer_proprietor TEXT NOT NULL DEFAULT '',
+    issuer_address TEXT NOT NULL,
+    issuer_email TEXT NOT NULL DEFAULT '',
+    issuer_tax_identifier TEXT NOT NULL,
+    tax_note TEXT NOT NULL DEFAULT '',
+    iban TEXT NOT NULL DEFAULT '',
+    bic TEXT NOT NULL DEFAULT '',
+    bank_name TEXT NOT NULL DEFAULT '',
+    stored_name TEXT NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_team ON tasks(team_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(project_id, status_key);
@@ -345,6 +395,7 @@ CREATE INDEX IF NOT EXISTS idx_support_requests_teacher ON support_requests(teac
 CREATE INDEX IF NOT EXISTS idx_license_orders_status ON license_orders(payment_status,plan);
 CREATE INDEX IF NOT EXISTS idx_licenses_status_dates ON licenses(status,starts_on,ends_on);
 CREATE INDEX IF NOT EXISTS idx_license_teachers_teacher ON license_teachers(teacher_id,license_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_issued_on ON invoices(issued_on,invoice_number);
 """
 
 
@@ -383,6 +434,37 @@ class Database:
                 connection.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
             if "license_managed" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN license_managed INTEGER NOT NULL DEFAULT 0")
+            order_columns = {row[1] for row in connection.execute("PRAGMA table_info(license_orders)").fetchall()}
+            if "billing_cycle" not in order_columns:
+                connection.execute(
+                    "ALTER TABLE license_orders ADD COLUMN billing_cycle TEXT NOT NULL DEFAULT 'annual' "
+                    "CHECK(billing_cycle IN ('none','monthly','annual'))"
+                )
+            connection.execute("UPDATE license_orders SET billing_cycle='none' WHERE plan='beta'")
+            connection.execute(
+                """INSERT OR IGNORE INTO invoice_settings(
+                       id,business_name,proprietor_name,address,email,tax_identifier,tax_mode,
+                       vat_rate_basis_points,invoice_prefix,next_invoice_number,payment_terms_days,
+                       iban,bic,bank_name,updated_at
+                   ) VALUES(1,?,?,?,?,?,'small_business',1900,'PK',1,14,'','','',?)""",
+                (
+                    "PRIMEAdvisory",
+                    "Jeroen L. Jochem",
+                    "Nieberdingstr. 41\n45147 Essen",
+                    "info@prime-advisory.de",
+                    "DE453188253",
+                    utcnow(),
+                ),
+            )
+            # Ab Version 3 benötigen sämtliche Lehrkraftkonten eine aktive
+            # Lizenz; alte Bestandskonten werden nicht mehr stillschweigend
+            # freigeschaltet.
+            if not connection.execute("SELECT 1 FROM schema_migrations WHERE version=3").fetchone():
+                connection.execute("UPDATE users SET license_managed=1 WHERE role='teacher' AND is_owner=0")
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,applied_at) VALUES(3,?)",
+                    (utcnow(),),
+                )
             # Seit Version 2 sind Plattform-Admin und Lehrkraft getrennte
             # Konten. Frühere globale Lehrkraftkonten bleiben Lehrkraftkonten;
             # anschließend kann einmalig ein eigener Admin eingerichtet werden.

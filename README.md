@@ -28,12 +28,19 @@ ihre eigenen Klassen und Schülerzugänge.
 
 Der Adminbereich enthält außerdem „Bestellungen & Lizenzen“. Dort werden Beta-,
 Einzel-, Fachbereichs- und Schullizenzen mit Preis, Zahlungsstatus, Laufzeit,
-Platzanzahl und zugeordneten Lehrkraftkonten verwaltet. Sobald ein
-Lehrkraftkonto erstmals einer Lizenz zugeordnet wurde, ist für seine Anmeldung
-eine aktive und aktuell gültige Lizenz erforderlich. Eine Sperrung oder ein
-Ablauf beendet den Zugang, löscht aber keine Unterrichtsdaten. Bereits
-vorhandene Konten ohne Lizenzzuordnung bleiben bei der Migration zunächst als
-Bestandszugänge erreichbar.
+Platzanzahl und zugeordneten Lehrkraftkonten verwaltet. Eine Standardlizenz kann
+bereits beim Anlegen oder Bearbeiten einer Lehrkraft erzeugt beziehungsweise
+ausgewählt werden; die Zuordnung bleibt zusätzlich innerhalb der Lizenz
+bearbeitbar. Für jede Lehrkraftanmeldung ist ausnahmslos eine aktive und aktuell
+gültige Lizenz erforderlich. Eine fehlende Freigabe, Sperrung oder ein Ablauf
+beendet den Zugang, löscht aber keine Unterrichtsdaten.
+
+Rechnungsanschrift und Bestellreferenz können nachträglich an der Lizenz ergänzt
+werden. Anschließend erzeugt der Admin eine fortlaufend nummerierte,
+unveränderlich gespeicherte PDF-Rechnung im Namen von PRIMEAdvisory. Angaben zum
+Rechnungssteller, Besteuerung, Zahlungsziel und Bankverbindung sind über
+„Rechnungssteller“ konfigurierbar. Die PDF-Ausgabe ist noch keine strukturierte
+XRechnung oder ZUGFeRD-Rechnung.
 
 Für einen schnellen Test ohne Installation kann der von Codex bereitgestellte
 Python verwendet werden, sofern die Abhängigkeiten dort vorhanden sind.

@@ -96,7 +96,7 @@ Zum Start genügen datensparsame Kennzahlen:
 - qualifizierte Kontaktanfragen,
 - Indexierungsfehler und Seitenerfahrung.
 
-Schülerlogin, interne Nutzung, Klassen-, Personen- und Projektdaten werden
+Loginbereich, interne Nutzung, Klassen-, Personen- und Projektdaten werden
 nicht für Marketingmessung verwendet.
 
 ## Referenzen zur technischen Umsetzung

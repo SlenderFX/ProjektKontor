@@ -563,6 +563,12 @@ class AppFlowTest(unittest.TestCase):
         _, second, _ = admin.request("POST", "/api/teachers", {
             "first_name": "Markus", "username": "lehrkraft_markus"
         })
+        unlicensed = Client(self.app)
+        status, denied, _ = unlicensed.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "lehrkraft_erika", "password": first["initial_password"]
+        })
+        self.assertEqual(status, 403)
+        self.assertIn("noch nicht freigeschaltet", denied["error"])
 
         status, rejected, _ = admin.request("POST", "/api/licenses", {
             "customer_name": "Schulleitung", "organization": "Beispiel-BK",
@@ -600,6 +606,28 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(licenses), 1)
         self.assertEqual(licenses[0]["organization"], "Beispiel-BK")
+        self.assertEqual(licenses[0]["billing_cycle"], "annual")
+
+        status, issuer, _ = admin.request("GET", "/api/invoice-settings")
+        self.assertEqual(status, 200)
+        self.assertEqual(issuer["business_name"], "PRIMEAdvisory")
+        self.assertEqual(issuer["tax_identifier"], "DE453188253")
+        status, missing_bank, _ = admin.request("POST", f"/api/licenses/{license_record['id']}/invoice", {})
+        self.assertEqual(status, 400)
+        self.assertIn("Bankverbindung", missing_bank["error"])
+        status, issuer, _ = admin.request("PATCH", "/api/invoice-settings", {
+            **issuer, "iban": "DE02120300000000202051", "bic": "BYLADEM1001",
+            "bank_name": "Beispielbank",
+        })
+        self.assertEqual(status, 200)
+        status, invoice, _ = admin.request("POST", f"/api/licenses/{license_record['id']}/invoice", {})
+        self.assertEqual(status, 200)
+        self.assertRegex(invoice["invoice_number"], r"^PK-\d{4}-0001$")
+        status, invoice_pdf, headers = admin.request("GET", f"/api/invoices/{invoice['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/pdf")
+        self.assertTrue(invoice_pdf.startswith(b"%PDF-"))
+        self.assertGreater(len(invoice_pdf), 2000)
 
         teacher = Client(self.app)
         status, _, _ = teacher.request("POST", "/api/login", {
@@ -622,7 +650,7 @@ class AppFlowTest(unittest.TestCase):
             "login_type": "teacher", "username": "lehrkraft_erika", "password": TEST_TEACHER_PASSWORD
         })
         self.assertEqual(status, 403)
-        self.assertIn("keine aktive Lizenz", denied["error"])
+        self.assertIn("noch nicht freigeschaltet", denied["error"])
         self.assertEqual(self.app.db.one("SELECT active FROM users WHERE id=?", (first["id"],))["active"], 1)
 
         status, _, _ = admin.request("PATCH", f"/api/licenses/{license_record['id']}", {
@@ -645,6 +673,54 @@ class AppFlowTest(unittest.TestCase):
             "expired",
         )
 
+    def test_teacher_creation_can_create_or_select_a_standard_license(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        status, monthly_teacher, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Frau Monat", "username": "lehrkraft_monat",
+            "license_selection": "new:monthly",
+            "license_customer_name": "Frau Monat",
+            "license_organization": "Monat-BK",
+            "license_email": "monat@example.org",
+            "license_billing_address": "Monatstraße 1\n45127 Essen",
+        })
+        self.assertEqual(status, 200)
+        monthly_license = self.app.db.one(
+            """SELECT l.id,l.status,l.starts_on,l.ends_on,o.plan,o.billing_cycle,o.amount_cents
+               FROM license_teachers lt JOIN licenses l ON l.id=lt.license_id
+               JOIN license_orders o ON o.id=l.order_id WHERE lt.teacher_id=?""",
+            (monthly_teacher["id"],),
+        )
+        self.assertEqual(monthly_license["plan"], "single")
+        self.assertEqual(monthly_license["billing_cycle"], "monthly")
+        self.assertEqual(monthly_license["amount_cents"], 890)
+        self.assertEqual(monthly_license["status"], "active")
+
+        status, unassigned, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Herr Frei", "username": "lehrkraft_frei"
+        })
+        self.assertEqual(status, 200)
+        status, _, _ = admin.request("PATCH", f"/api/teachers/{unassigned['id']}", {
+            "first_name": "Herr Frei", "username": "lehrkraft_frei", "active": True,
+            "license_selection": f"existing:{monthly_license['id']}",
+        })
+        self.assertEqual(status, 409)
+        department_status, department, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Fachbereich", "organization": "Monat-BK",
+            "plan": "department", "seat_limit": 5, "amount_cents": 29900,
+            "payment_status": "open", "status": "active",
+            "starts_on": "2020-01-01", "ends_on": "2099-12-31", "teacher_ids": [],
+        })
+        self.assertEqual(department_status, 200)
+        status, _, _ = admin.request("PATCH", f"/api/teachers/{unassigned['id']}", {
+            "first_name": "Herr Frei", "username": "lehrkraft_frei", "active": True,
+            "license_selection": f"existing:{department['id']}",
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(self.app.teacher_license_valid(unassigned["id"]))
+
     def test_security_headers_and_malformed_image_rejection(self):
         status, _, headers = self.client.request("GET", "/api/health")
         self.assertEqual(status, 200)
@@ -662,6 +738,11 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b'href="#/admin/licenses">Bestellungen &amp; Lizenzen</a>', app_script)
         self.assertIn(b"async function renderLicenses()", app_script)
         self.assertIn(b"Zugeordnete Lehrkraftzug\xc3\xa4nge", app_script)
+        self.assertIn(b"Rechnungssteller", app_script)
+        self.assertIn(b"new:monthly", app_script)
+        self.assertIn(b"/api/invoice-settings", app_script)
+        self.assertIn(b"PDF erstellen", app_script)
+        self.assertIn(b"strukturierte XRechnung", app_script)
         self.assertIn(b'<button class="button primary" id="add-user">Zugang manuell anlegen</button>', app_script)
         with self.assertRaises(Exception) as rejected:
             self.app.validated_upload({
@@ -705,6 +786,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"begrenzte Anzahl kostenfreier Beta-Testzug\xc3\xa4nge", landing)
         self.assertIn(b"4 Wochen kostenfrei testen", landing)
         self.assertNotIn(b"6\xe2\x80\x938 Wochen", landing)
+        self.assertEqual(landing.count(b"Keine automatische Verl\xc3\xa4ngerung"), 1)
         self.assertIn(b"Nachhaltige Sch\xc3\xbclerfirma", landing)
         self.assertIn(b"Vom Projektauftrag bis zum gesicherten Ergebnis", landing)
         self.assertIn(b"VPS in Deutschland", landing)
@@ -717,7 +799,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"Ergebnisse einer Einheit", landing)
         self.assertIn(b"\xc3\xbcbergeordnete Handlungsergebnis", landing)
         self.assertNotIn(b"Kein zus\xc3\xa4tzlicher Verwaltungsort", landing)
-        self.assertIn(b'href="/login">Sch\xc3\xbclerlogin', landing)
+        self.assertIn(b'href="/login">Login', landing)
         self.assertIn(b'<link rel="canonical" href="https://projektkontor.org/">', landing)
         self.assertIn(b'<link rel="icon" type="image/png" sizes="64x64" href="/favicon.png">', landing)
         self.assertIn(b'<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">', landing)
@@ -750,7 +832,8 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"largestVisibleArea", landing_script)
         self.assertIn(b"visibleArea", landing_script)
         self.assertIn(b"history.pushState", landing_script)
-        self.assertIn(b"projektkontor-beta-popup-seen", landing_script)
+        self.assertIn(b"projektkontor-beta-popup-dismissed-v2", landing_script)
+        self.assertEqual(landing_script.count(b"rememberBetaPopup();"), 1)
         self.assertIn(b"15000", landing_script)
         self.assertIn(b"Kostenloser Beta-Testzugang", landing_script)
         self.assertIn(b"scrollPosition", landing_script)
@@ -982,10 +1065,11 @@ class AppFlowTest(unittest.TestCase):
         self.app.db.initialize()
         account = self.app.db.one("SELECT username,is_owner FROM users WHERE username='lehrkraft'")
         self.assertEqual(account["is_owner"], 0)
-        status, _, _ = self.client.request("POST", "/api/login", {
+        status, denied, _ = self.client.request("POST", "/api/login", {
             "login_type": "teacher", "username": "lehrkraft", "password": "sicheres-testkennwort"
         })
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 403)
+        self.assertIn("noch nicht freigeschaltet", denied["error"])
         _, bootstrap, _ = self.client.request("GET", "/api/bootstrap")
         self.assertFalse(bootstrap["configured"])
         self.assertTrue(bootstrap["setup_available"])

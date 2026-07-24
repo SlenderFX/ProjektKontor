@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import calendar
 import hashlib
 import hmac
 import io
@@ -16,7 +17,7 @@ import sys
 import traceback
 import unicodedata
 import warnings
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http import cookies
 from email.message import EmailMessage
 from email.utils import formataddr, parseaddr
@@ -32,6 +33,7 @@ from .config import Config, load_config
 from .db import Database, TEAM_COLOR_PALETTE, seed_project_statuses, utcnow
 from .import_export import (
     account_template,
+    generate_invoice_pdf,
     generate_project_report,
     next_username,
     parse_account_workbook,
@@ -50,6 +52,7 @@ LICENSE_PLANS = {
 }
 LICENSE_STATUSES = {"draft", "active", "suspended", "expired", "cancelled"}
 PAYMENT_STATUSES = {"not_required", "open", "paid", "overdue", "refunded", "cancelled"}
+BILLING_CYCLES = {"none", "monthly", "annual"}
 PRIVACY_VERSION = "2026-07-24.1"
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
@@ -115,6 +118,24 @@ def parse_date(value: Any, field: str) -> str:
     return text
 
 
+def standard_license_dates(kind: str) -> tuple[str, str]:
+    starts = datetime.now(timezone.utc).date()
+    if kind == "beta":
+        ends = starts + timedelta(days=27)
+    elif kind == "monthly":
+        year = starts.year + (1 if starts.month == 12 else 0)
+        month = 1 if starts.month == 12 else starts.month + 1
+        next_month = date(year, month, min(starts.day, calendar.monthrange(year, month)[1]))
+        ends = next_month - timedelta(days=1)
+    else:
+        try:
+            next_year = starts.replace(year=starts.year + 1)
+        except ValueError:
+            next_year = starts.replace(year=starts.year + 1, day=28)
+        ends = next_year - timedelta(days=1)
+    return starts.isoformat(), ends.isoformat()
+
+
 def normalize_due_at(value: Any) -> str | None:
     """A date-only task/upload deadline expires at the end of that day."""
     text = str(value or "").strip()
@@ -168,6 +189,10 @@ class App:
         route("GET", r"/api/licenses")(self.list_licenses)
         route("POST", r"/api/licenses")(self.create_license)
         route("PATCH", r"/api/licenses/(?P<license_id>\d+)")(self.update_license)
+        route("GET", r"/api/invoice-settings")(self.get_invoice_settings)
+        route("PATCH", r"/api/invoice-settings")(self.update_invoice_settings)
+        route("POST", r"/api/licenses/(?P<license_id>\d+)/invoice")(self.create_invoice)
+        route("GET", r"/api/invoices/(?P<invoice_id>\d+)")(self.download_invoice)
         route("GET", r"/api/classes")(self.list_classes)
         route("POST", r"/api/classes")(self.create_class)
         route("PATCH", r"/api/classes/(?P<class_id>\d+)")(self.update_class)
@@ -428,14 +453,6 @@ class App:
 
     def teacher_license_valid(self, teacher_id: int) -> bool:
         self.refresh_expired_licenses()
-        account = self.db.one(
-            "SELECT license_managed FROM users WHERE id=? AND role='teacher' AND is_owner=0",
-            (teacher_id,),
-        )
-        if not account or not account.get("license_managed"):
-            # Bestandskonten ohne Lizenzzuordnung bleiben nach der Migration
-            # erreichbar, bis der Admin sie erstmals einer Lizenz zuordnet.
-            return True
         today = datetime.now(timezone.utc).date().isoformat()
         return bool(self.db.one(
             """SELECT 1 ok FROM license_teachers lt
@@ -450,7 +467,7 @@ class App:
         if not account:
             raise HttpError(401, "Konto nicht gefunden oder deaktiviert.")
         if account["role"] == "teacher" and not account.get("is_owner") and not self.teacher_license_valid(user_id):
-            raise HttpError(403, "Der Lehrkraftzugang besitzt derzeit keine aktive Lizenz.")
+            raise HttpError(403, "Dieser Lehrkraftzugang ist noch nicht freigeschaltet. Bitte wenden Sie sich an die ProjektKontor-Verwaltung.")
         duration_hours = 6 if account["role"] == "student" else 12
         max_age = duration_hours * 60 * 60
         token = new_session_token()
@@ -541,7 +558,7 @@ class App:
     def authenticated_login_result(self, user_id: int) -> Any:
         account = self.db.one("SELECT role,is_owner,must_change_password FROM users WHERE id=? AND active=1", (user_id,))
         if account and account["role"] == "teacher" and not account.get("is_owner") and not self.teacher_license_valid(user_id):
-            raise HttpError(403, "Der Lehrkraftzugang besitzt derzeit keine aktive Lizenz. Bitte wenden Sie sich an die ProjektKontor-Verwaltung.")
+            raise HttpError(403, "Dieser Lehrkraftzugang ist noch nicht freigeschaltet. Bitte wenden Sie sich an die ProjektKontor-Verwaltung.")
         if account and account["role"] == "teacher" and not account.get("is_owner") and account.get("must_change_password"):
             token = new_session_token()
             expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(timespec="seconds")
@@ -917,7 +934,7 @@ class App:
         record = self.db.one(
             """SELECT l.id,l.order_id,l.seat_limit,l.starts_on,l.ends_on,l.status,
                       l.created_at,l.updated_at,o.customer_name,o.organization,o.email,
-                      o.billing_address,o.invoice_reference,o.plan,o.amount_cents,
+                      o.billing_address,o.invoice_reference,o.plan,o.billing_cycle,o.amount_cents,
                       o.payment_status,o.notes
                FROM licenses l JOIN license_orders o ON o.id=l.order_id
                WHERE l.id=?""",
@@ -932,6 +949,10 @@ class App:
             (license_id,),
         )
         record["used_seats"] = len(record["teachers"])
+        record["invoice"] = self.db.one(
+            "SELECT id,invoice_number,issued_on,due_on,gross_cents,stored_name FROM invoices WHERE license_id=?",
+            (license_id,),
+        )
         return record
 
     def list_licenses(self, environ, user):
@@ -971,13 +992,25 @@ class App:
         payment_status = str(data.get("payment_status", current["payment_status"] if current else ("not_required" if plan == "beta" else "open"))).strip()
         if status not in LICENSE_STATUSES or payment_status not in PAYMENT_STATUSES:
             raise HttpError(400, "Lizenz- oder Zahlungsstatus ist ungültig.")
+        billing_cycle = str(data.get(
+            "billing_cycle",
+            current.get("billing_cycle", "annual") if current else ("none" if plan == "beta" else "annual"),
+        )).strip()
+        if billing_cycle not in BILLING_CYCLES:
+            raise HttpError(400, "Der Abrechnungszeitraum ist ungültig.")
         if plan == "beta":
+            billing_cycle = "none"
             beta_end = (datetime.fromisoformat(starts_on).date() + timedelta(days=27)).isoformat()
             if ends_on > beta_end:
                 raise HttpError(400, "Ein Beta-Testzugang darf höchstens vier Wochen gültig sein.")
             if amount_cents != 0:
                 raise HttpError(400, "Ein Beta-Testzugang muss kostenfrei sein.")
             payment_status = "not_required"
+        elif plan == "single":
+            if billing_cycle not in {"monthly", "annual"}:
+                raise HttpError(400, "Für eine Einzellizenz ist ein Monats- oder Jahreszugang erforderlich.")
+        else:
+            billing_cycle = "annual"
         today = datetime.now(timezone.utc).date().isoformat()
         if status == "active" and ends_on < today:
             status = "expired"
@@ -1003,6 +1036,7 @@ class App:
             "customer_name": customer_name, "organization": organization, "email": email,
             "billing_address": billing_address, "invoice_reference": invoice_reference,
             "plan": plan, "amount_cents": amount_cents, "payment_status": payment_status,
+            "billing_cycle": billing_cycle,
             "notes": notes, "seat_limit": seat_limit, "starts_on": starts_on,
             "ends_on": ends_on, "status": status, "teacher_ids": teacher_ids,
         }
@@ -1029,10 +1063,10 @@ class App:
         with self.db.transaction() as connection:
             order = connection.execute(
                 """INSERT INTO license_orders(customer_name,organization,email,billing_address,
-                   invoice_reference,plan,amount_cents,payment_status,notes,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                   invoice_reference,plan,billing_cycle,amount_cents,payment_status,notes,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (values["customer_name"], values["organization"], values["email"], values["billing_address"],
-                 values["invoice_reference"], values["plan"], values["amount_cents"],
+                 values["invoice_reference"], values["plan"], values["billing_cycle"], values["amount_cents"],
                  values["payment_status"], values["notes"], now, now),
             )
             license_row = connection.execute(
@@ -1069,10 +1103,10 @@ class App:
         with self.db.transaction() as connection:
             connection.execute(
                 """UPDATE license_orders SET customer_name=?,organization=?,email=?,billing_address=?,
-                   invoice_reference=?,plan=?,amount_cents=?,payment_status=?,notes=?,updated_at=?
+                   invoice_reference=?,plan=?,billing_cycle=?,amount_cents=?,payment_status=?,notes=?,updated_at=?
                    WHERE id=?""",
                 (values["customer_name"], values["organization"], values["email"], values["billing_address"],
-                 values["invoice_reference"], values["plan"], values["amount_cents"],
+                 values["invoice_reference"], values["plan"], values["billing_cycle"], values["amount_cents"],
                  values["payment_status"], values["notes"], now, current["order_id"]),
             )
             connection.execute(
@@ -1094,6 +1128,180 @@ class App:
                 )
         return self.license_record(license_id)
 
+    def get_invoice_settings(self, environ, user):
+        self.require_owner(user)
+        return self.db.one("SELECT * FROM invoice_settings WHERE id=1")
+
+    def update_invoice_settings(self, environ, user):
+        self.require_owner(user)
+        current = self.db.one("SELECT * FROM invoice_settings WHERE id=1")
+        data = self.body(environ)
+        business_name = str(data.get("business_name", current["business_name"])).strip()
+        proprietor_name = str(data.get("proprietor_name", current["proprietor_name"])).strip()
+        address = str(data.get("address", current["address"])).strip()
+        email = str(data.get("email", current["email"])).strip().lower()
+        tax_identifier = str(data.get("tax_identifier", current["tax_identifier"])).strip()
+        tax_mode = str(data.get("tax_mode", current["tax_mode"])).strip()
+        invoice_prefix = str(data.get("invoice_prefix", current["invoice_prefix"])).strip().upper()
+        iban = re.sub(r"\s+", "", str(data.get("iban", current["iban"]))).upper()
+        bic = re.sub(r"\s+", "", str(data.get("bic", current["bic"]))).upper()
+        bank_name = str(data.get("bank_name", current["bank_name"])).strip()
+        try:
+            vat_rate_basis_points = int(data.get("vat_rate_basis_points", current["vat_rate_basis_points"]))
+            payment_terms_days = int(data.get("payment_terms_days", current["payment_terms_days"]))
+        except (TypeError, ValueError) as exc:
+            raise HttpError(400, "Steuersatz oder Zahlungsziel ist ungültig.") from exc
+        if not 2 <= len(business_name) <= 160 or not 5 <= len(address) <= 1000:
+            raise HttpError(400, "Name und vollständige Anschrift des Rechnungsstellers sind erforderlich.")
+        if not 3 <= len(tax_identifier) <= 40:
+            raise HttpError(400, "Bitte geben Sie eine gültige steuerliche Kennung an.")
+        if email and (parseaddr(email)[1] != email or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email)):
+            raise HttpError(400, "Die E-Mail-Adresse des Rechnungsstellers ist ungültig.")
+        if tax_mode not in {"small_business", "standard"} or not 0 <= vat_rate_basis_points <= 10000:
+            raise HttpError(400, "Die umsatzsteuerliche Einstellung ist ungültig.")
+        if not re.fullmatch(r"[A-Z0-9-]{1,12}", invoice_prefix):
+            raise HttpError(400, "Das Rechnungspräfix darf nur Großbuchstaben, Ziffern und Bindestriche enthalten.")
+        if not 0 <= payment_terms_days <= 365:
+            raise HttpError(400, "Das Zahlungsziel muss zwischen 0 und 365 Tagen liegen.")
+        if iban and not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}", iban):
+            raise HttpError(400, "Die IBAN ist formal ungültig.")
+        if bic and not re.fullmatch(r"[A-Z0-9]{8}([A-Z0-9]{3})?", bic):
+            raise HttpError(400, "Die BIC ist formal ungültig.")
+        self.db.execute(
+            """UPDATE invoice_settings SET business_name=?,proprietor_name=?,address=?,email=?,
+               tax_identifier=?,tax_mode=?,vat_rate_basis_points=?,invoice_prefix=?,
+               payment_terms_days=?,iban=?,bic=?,bank_name=?,updated_at=? WHERE id=1""",
+            (
+                business_name, proprietor_name, address, email, tax_identifier, tax_mode,
+                vat_rate_basis_points, invoice_prefix, payment_terms_days, iban, bic,
+                bank_name, utcnow(),
+            ),
+        )
+        return self.db.one("SELECT * FROM invoice_settings WHERE id=1")
+
+    @staticmethod
+    def invoice_description(license_record: dict[str, Any]) -> str:
+        if license_record["plan"] == "single":
+            cycle = "Monatszugang" if license_record.get("billing_cycle") == "monthly" else "Jahreszugang"
+            return f"ProjektKontor Einzellizenz - {cycle} für eine Lehrkraft"
+        if license_record["plan"] == "department":
+            return f"ProjektKontor Fachbereichslizenz für bis zu {license_record['seat_limit']} Lehrkräfte"
+        if license_record["plan"] == "school":
+            return f"ProjektKontor Schullizenz für bis zu {license_record['seat_limit']} Lehrkräfte"
+        return "ProjektKontor Lizenz"
+
+    def create_invoice(self, environ, user, license_id):
+        owner = self.require_owner(user)
+        license_record = self.license_record(license_id)
+        if not license_record:
+            raise HttpError(404, "Lizenz nicht gefunden.")
+        if license_record.get("invoice"):
+            return license_record["invoice"]
+        if license_record["plan"] == "beta" or license_record["amount_cents"] <= 0:
+            raise HttpError(400, "Für einen kostenfreien Beta-Testzugang wird keine Rechnung erstellt.")
+        if not license_record["billing_address"].strip():
+            raise HttpError(400, "Ergänzen Sie vor der Rechnungserstellung die vollständige Rechnungsanschrift.")
+        settings = self.db.one("SELECT * FROM invoice_settings WHERE id=1")
+        if not settings or not settings["business_name"] or not settings["address"] or not settings["tax_identifier"]:
+            raise HttpError(400, "Vervollständigen Sie zunächst die Angaben zum Rechnungssteller.")
+        if not settings["iban"]:
+            raise HttpError(400, "Ergänzen Sie vor der Rechnungserstellung die Bankverbindung des Rechnungsstellers.")
+        issued = datetime.now(timezone.utc).date()
+        due = issued + timedelta(days=settings["payment_terms_days"])
+        gross_cents = int(license_record["amount_cents"])
+        if settings["tax_mode"] == "standard" and settings["vat_rate_basis_points"] > 0:
+            net_cents = round(gross_cents * 10000 / (10000 + settings["vat_rate_basis_points"]))
+            vat_cents = gross_cents - net_cents
+            vat_rate = settings["vat_rate_basis_points"]
+            tax_note = ""
+        else:
+            net_cents = gross_cents
+            vat_cents = 0
+            vat_rate = 0
+            tax_note = "Steuerbefreiung für Kleinunternehmer gemäß § 19 UStG."
+        now = utcnow()
+        stored_name = ""
+        with self.db.transaction() as connection:
+            existing = connection.execute(
+                "SELECT id,invoice_number,issued_on,due_on,gross_cents,stored_name FROM invoices WHERE license_id=?",
+                (license_id,),
+            ).fetchone()
+            if existing:
+                return dict(existing)
+            locked_settings = dict(connection.execute("SELECT * FROM invoice_settings WHERE id=1").fetchone())
+            invoice_number = f"{locked_settings['invoice_prefix']}-{issued.year}-{locked_settings['next_invoice_number']:04d}"
+            stored_name = f"rechnung-{invoice_number.lower()}.pdf"
+            snapshot = {
+                "invoice_number": invoice_number,
+                "issued_on": issued.isoformat(),
+                "service_on": license_record["starts_on"],
+                "due_on": due.isoformat(),
+                "customer_name": license_record["customer_name"],
+                "organization": license_record["organization"],
+                "billing_address": license_record["billing_address"],
+                "invoice_reference": license_record["invoice_reference"],
+                "description": self.invoice_description(license_record),
+                "net_cents": net_cents,
+                "vat_rate_basis_points": vat_rate,
+                "vat_cents": vat_cents,
+                "gross_cents": gross_cents,
+                "issuer_name": locked_settings["business_name"],
+                "issuer_proprietor": locked_settings["proprietor_name"],
+                "issuer_address": locked_settings["address"],
+                "issuer_email": locked_settings["email"],
+                "issuer_tax_identifier": locked_settings["tax_identifier"],
+                "tax_note": tax_note,
+                "iban": locked_settings["iban"],
+                "bic": locked_settings["bic"],
+                "bank_name": locked_settings["bank_name"],
+                "license_starts_on": license_record["starts_on"],
+                "license_ends_on": license_record["ends_on"],
+            }
+            pdf_bytes = generate_invoice_pdf(snapshot)
+            destination = self.config.report_dir / stored_name
+            temporary = destination.with_suffix(".tmp")
+            temporary.write_bytes(pdf_bytes)
+            temporary.replace(destination)
+            cursor = connection.execute(
+                """INSERT INTO invoices(
+                       license_id,invoice_number,issued_on,service_on,due_on,customer_name,
+                       organization,email,billing_address,invoice_reference,description,
+                       net_cents,vat_rate_basis_points,vat_cents,gross_cents,issuer_name,
+                       issuer_proprietor,issuer_address,issuer_email,issuer_tax_identifier,
+                       tax_note,iban,bic,bank_name,stored_name,created_by,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    license_id, invoice_number, issued.isoformat(), license_record["starts_on"],
+                    due.isoformat(), license_record["customer_name"], license_record["organization"],
+                    license_record["email"], license_record["billing_address"],
+                    license_record["invoice_reference"], snapshot["description"], net_cents,
+                    vat_rate, vat_cents, gross_cents, snapshot["issuer_name"],
+                    snapshot["issuer_proprietor"], snapshot["issuer_address"],
+                    snapshot["issuer_email"], snapshot["issuer_tax_identifier"], tax_note,
+                    snapshot["iban"], snapshot["bic"], snapshot["bank_name"], stored_name,
+                    owner["id"], now,
+                ),
+            )
+            connection.execute(
+                "UPDATE invoice_settings SET next_invoice_number=next_invoice_number+1,updated_at=? WHERE id=1",
+                (now,),
+            )
+            invoice_id = int(cursor.lastrowid)
+        return self.db.one(
+            "SELECT id,invoice_number,issued_on,due_on,gross_cents,stored_name FROM invoices WHERE id=?",
+            (invoice_id,),
+        )
+
+    def download_invoice(self, environ, user, invoice_id):
+        self.require_owner(user)
+        invoice = self.db.one("SELECT invoice_number,stored_name FROM invoices WHERE id=?", (invoice_id,))
+        if not invoice:
+            raise HttpError(404, "Rechnung nicht gefunden.")
+        path = self.config.report_dir / invoice["stored_name"]
+        if not path.is_file():
+            raise HttpError(404, "Die Rechnungsdatei ist nicht mehr vorhanden.")
+        return path.read_bytes(), "application/pdf", f"Rechnung-{invoice['invoice_number']}.pdf", []
+
     def list_teachers(self, environ, user):
         self.require_owner(user)
         teachers = self.db.all(
@@ -1107,7 +1315,7 @@ class App:
         self.refresh_expired_licenses()
         for teacher in teachers:
             teacher["licenses"] = self.db.all(
-                """SELECT l.id,l.status,l.starts_on,l.ends_on,o.plan,o.organization
+                """SELECT l.id,l.status,l.starts_on,l.ends_on,o.plan,o.billing_cycle,o.organization
                    FROM license_teachers lt JOIN licenses l ON l.id=lt.license_id
                    JOIN license_orders o ON o.id=l.order_id
                    WHERE lt.teacher_id=? ORDER BY l.ends_on DESC,l.id DESC""",
@@ -1115,6 +1323,89 @@ class App:
             )
             teacher["license_valid"] = self.teacher_license_valid(teacher["id"])
         return teachers
+
+    def assign_teacher_license(
+        self,
+        connection: sqlite3.Connection,
+        teacher_id: int,
+        teacher_name: str,
+        selection: str,
+        data: dict[str, Any],
+        now: str,
+    ) -> int | None:
+        selection = str(selection or "none").strip()
+        current_ids = {
+            int(row[0]) for row in connection.execute(
+                """SELECT l.id FROM license_teachers lt JOIN licenses l ON l.id=lt.license_id
+                   WHERE lt.teacher_id=? AND l.status IN ('draft','active','suspended')""",
+                (teacher_id,),
+            ).fetchall()
+        }
+        target_id: int | None = None
+        if selection.startswith("existing:"):
+            try:
+                target_id = int(selection.split(":", 1)[1])
+            except ValueError as exc:
+                raise HttpError(400, "Die ausgewählte Lizenz ist ungültig.") from exc
+            target = connection.execute(
+                """SELECT l.id,l.seat_limit,l.status,
+                          (SELECT COUNT(*) FROM license_teachers lt WHERE lt.license_id=l.id) used_seats
+                   FROM licenses l WHERE l.id=?""",
+                (target_id,),
+            ).fetchone()
+            if not target or target["status"] not in {"draft", "active", "suspended"}:
+                raise HttpError(400, "Die ausgewählte Lizenz kann nicht mehr zugeordnet werden.")
+            already_assigned = target_id in current_ids
+            if not already_assigned and target["used_seats"] >= target["seat_limit"]:
+                raise HttpError(409, "Die ausgewählte Lizenz hat keinen freien Lehrkraftplatz mehr.")
+        elif selection in {"new:beta", "new:monthly", "new:annual"}:
+            kind = selection.split(":", 1)[1]
+            starts_on, ends_on = standard_license_dates(kind)
+            plan = "beta" if kind == "beta" else "single"
+            billing_cycle = "none" if kind == "beta" else kind
+            amount_cents = {"beta": 0, "monthly": 890, "annual": 7900}[kind]
+            payment_status = "not_required" if kind == "beta" else "open"
+            customer_name = str(data.get("license_customer_name") or teacher_name).strip()
+            organization = str(data.get("license_organization") or "").strip()
+            email = str(data.get("license_email") or "").strip().lower()
+            billing_address = str(data.get("license_billing_address") or "").strip()
+            if email and (parseaddr(email)[1] != email or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email)):
+                raise HttpError(400, "Die E-Mail-Adresse für die Lizenz ist ungültig.")
+            order = connection.execute(
+                """INSERT INTO license_orders(
+                       customer_name,organization,email,billing_address,invoice_reference,
+                       plan,billing_cycle,amount_cents,payment_status,notes,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    customer_name, organization, email, billing_address, "", plan,
+                    billing_cycle, amount_cents, payment_status,
+                    "Automatisch bei der Lehrkraftanlage erzeugt.", now, now,
+                ),
+            )
+            license_row = connection.execute(
+                """INSERT INTO licenses(order_id,seat_limit,starts_on,ends_on,status,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (int(order.lastrowid), 1, starts_on, ends_on, "active", now, now),
+            )
+            target_id = int(license_row.lastrowid)
+        elif selection != "none":
+            raise HttpError(400, "Die ausgewählte Lizenzoption ist ungültig.")
+
+        removable = current_ids - ({target_id} if target_id else set())
+        if removable:
+            placeholders = ",".join("?" for _ in removable)
+            connection.execute(
+                f"DELETE FROM license_teachers WHERE teacher_id=? AND license_id IN ({placeholders})",
+                (teacher_id, *removable),
+            )
+        if target_id:
+            connection.execute(
+                "INSERT OR IGNORE INTO license_teachers(license_id,teacher_id,assigned_at) VALUES(?,?,?)",
+                (target_id, teacher_id, now),
+            )
+        connection.execute("UPDATE users SET license_managed=1 WHERE id=?", (teacher_id,))
+        connection.execute("DELETE FROM sessions WHERE user_id=?", (teacher_id,))
+        return target_id
 
     def create_teacher(self, environ, user):
         self.require_owner(user)
@@ -1128,6 +1419,7 @@ class App:
         if not username.startswith("lehrkraft_") or not re.fullmatch(r"lehrkraft_[a-zA-Z0-9._-]{3,40}", username):
             raise HttpError(400, "Der Benutzername muss mit „lehrkraft_“ beginnen und danach 3 bis 40 zulässige Zeichen enthalten.")
         initial_password = generate_access_code(12)
+        license_selection = str(data.get("license_selection", "none"))
         try:
             with self.db.transaction() as connection:
                 cursor = connection.execute(
@@ -1135,9 +1427,12 @@ class App:
                     (first_name, username, hash_password(initial_password), "teacher", utcnow()),
                 )
                 teacher_id = int(cursor.lastrowid)
+                license_id = self.assign_teacher_license(
+                    connection, teacher_id, first_name, license_selection, data, utcnow()
+                )
         except sqlite3.IntegrityError:
             raise HttpError(409, "Dieser Benutzername ist bereits vergeben.")
-        return {"id": teacher_id, "initial_password": initial_password}
+        return {"id": teacher_id, "initial_password": initial_password, "license_id": license_id}
 
     def update_teacher(self, environ, user, teacher_id):
         self.require_owner(user)
@@ -1155,6 +1450,7 @@ class App:
         if not first_name or len(first_name) > 80 or not re.fullmatch(r"lehrkraft_[a-zA-Z0-9._-]{3,40}", username):
             raise HttpError(400, "Name oder Benutzername ist ungültig.")
         initial_password = generate_access_code(12) if data.get("reset_password") else None
+        license_selection = data.get("license_selection")
         if initial_password and teacher.get("last_login_at"):
             raise HttpError(403, "Nach der ersten Anmeldung ändert nur die Lehrkraft selbst ihr Kennwort.")
         try:
@@ -1164,6 +1460,10 @@ class App:
                     "UPDATE users SET first_name=?,username=?,credential=?,must_change_password=?,active=? WHERE id=?",
                     (first_name, username, credential, 1 if initial_password else teacher.get("must_change_password", 0), active, teacher_id),
                 )
+                if license_selection is not None:
+                    self.assign_teacher_license(
+                        connection, teacher_id, first_name, str(license_selection), data, utcnow()
+                    )
                 if not active or initial_password:
                     connection.execute("DELETE FROM sessions WHERE user_id=?", (teacher_id,))
         except sqlite3.IntegrityError:

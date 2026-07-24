@@ -63,7 +63,7 @@ const betaDialog=document.querySelector('#beta-dialog');
 const betaDialogClose=betaDialog?.querySelector('.beta-dialog-close');
 const betaDialogLater=betaDialog?.querySelector('.beta-dialog-later');
 const betaContactLinks=document.querySelectorAll('.beta-contact-link');
-const betaPopupKey='projektkontor-beta-popup-seen';
+const betaPopupKey='projektkontor-beta-popup-dismissed-v2';
 function rememberBetaPopup(){
   try{sessionStorage.setItem(betaPopupKey,'true')}catch(error){}
 }
@@ -93,9 +93,9 @@ betaDialogClose?.addEventListener('click',closeBetaDialog);
 betaDialogLater?.addEventListener('click',closeBetaDialog);
 betaDialog?.addEventListener('cancel',rememberBetaPopup);
 betaDialog?.addEventListener('click',event=>{if(event.target===betaDialog)closeBetaDialog()});
-let betaPopupSeen=false;
-try{betaPopupSeen=sessionStorage.getItem(betaPopupKey)==='true'}catch(error){}
-if(betaDialog&&!betaPopupSeen){
+let betaPopupDismissed=false;
+try{betaPopupDismissed=sessionStorage.getItem(betaPopupKey)==='true'}catch(error){}
+if(betaDialog&&!betaPopupDismissed){
   window.setTimeout(()=>{
     if(!betaDialog.open){
       const scrollPosition={left:window.scrollX,top:window.scrollY};
@@ -108,7 +108,6 @@ if(betaDialog&&!betaPopupSeen){
         window.scrollTo(scrollPosition);
         root.style.scrollBehavior=previousScrollBehavior;
       });
-      rememberBetaPopup();
     }
   },15000);
 }
