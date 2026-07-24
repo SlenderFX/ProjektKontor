@@ -3,6 +3,14 @@ const $ = (s,root=document)=>root.querySelector(s);
 const $$ = (s,root=document)=>[...root.querySelectorAll(s)];
 const esc = value => String(value ?? '').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmt = value => value ? new Intl.DateTimeFormat('de-DE',{dateStyle:'short',timeStyle:'short'}).format(new Date(value)) : '–';
+const fmtDate = value => {
+  if(!value)return '–';
+  const [year,month,day]=String(value).slice(0,10).split('-');
+  return `${day}.${month}.${year}`;
+};
+const LICENSE_PLANS={beta:'Beta-Test',single:'Einzellizenz',department:'Fachbereich',school:'Schullizenz'};
+const LICENSE_STATUS={draft:'Entwurf',active:'Aktiv',suspended:'Gesperrt',expired:'Abgelaufen',cancelled:'Storniert'};
+const PAYMENT_STATUS={not_required:'Kostenfrei',open:'Offen',paid:'Bezahlt',overdue:'Überfällig',refunded:'Erstattet',cancelled:'Storniert'};
 const fmtProjectDate = (value,includeTime) => {
   if(!value)return '–';
   if(!includeTime){const [year,month,day]=String(value).slice(0,10).split('-');return `${day}.${month}.${year}`}
@@ -112,7 +120,7 @@ async function route(){
     else if(state.route==='projects') await renderProjects();
     else if(state.route==='tasks') await renderMyTasks();
     else if(state.route==='notifications') await renderNotifications();
-    else if(state.route==='admin') await renderAdmin(['users','teachers','support','help','account'].includes(parts[1])?parts[1]:(parts[1]?Number(parts[1]):null));
+    else if(state.route==='admin') await renderAdmin(['users','teachers','licenses','support','help','account'].includes(parts[1])?parts[1]:(parts[1]?Number(parts[1]):null));
     else await renderHome();
   }catch(err){$('#content').innerHTML=empty('Das hat nicht funktioniert',err.message);toast(err.message,true)}
   $('#content').focus();
@@ -268,6 +276,7 @@ async function renderAdmin(classId=null){
   const classes=await loadClasses();
   if(classId==='users'){if(state.user.is_owner){location.hash='#/admin/support';return}await renderAllUsers(classes);return}
   if(classId==='teachers'){if(!state.user.is_owner){location.hash='#/admin';return}await renderTeachers(classes);return}
+  if(classId==='licenses'){if(!state.user.is_owner){location.hash='#/admin';return}await renderLicenses();return}
   if(classId==='support'){if(!state.user.is_owner){location.hash='#/admin';return}await renderSupport();return}
   if(classId==='help'){if(state.user.is_owner){location.hash='#/admin/support';return}await renderHelp();return}
   if(classId==='account'){renderOwnAccount();return}
@@ -301,7 +310,7 @@ async function renderAdmin(classId=null){
   }));
   $('#delete-multiple-users').addEventListener('click',()=>batchDeleteUsersDialog(users));
 }
-function adminViewTabs(active){return state.user.is_owner?`<div class="tabs admin-tabs"><a class="${active==='teachers'?'active':''}" href="#/admin/teachers">Lehrkraftzugänge</a><a class="${active==='support'?'active':''}" href="#/admin/support">Supportzugriff</a><a class="${active==='account'?'active':''}" href="#/admin/account">Eigenes Konto</a></div>`:`<div class="tabs admin-tabs"><a class="${active==='classes'?'active':''}" href="#/admin">Klassen</a><a class="${active==='users'?'active':''}" href="#/admin/users">Alle Zugänge</a><a class="${active==='help'?'active':''}" href="#/admin/help">Hilfe anfordern</a><a class="${active==='account'?'active':''}" href="#/admin/account">Eigenes Konto</a></div>`}
+function adminViewTabs(active){return state.user.is_owner?`<div class="tabs admin-tabs"><a class="${active==='teachers'?'active':''}" href="#/admin/teachers">Lehrkraftzugänge</a><a class="${active==='licenses'?'active':''}" href="#/admin/licenses">Bestellungen &amp; Lizenzen</a><a class="${active==='support'?'active':''}" href="#/admin/support">Supportzugriff</a><a class="${active==='account'?'active':''}" href="#/admin/account">Eigenes Konto</a></div>`:`<div class="tabs admin-tabs"><a class="${active==='classes'?'active':''}" href="#/admin">Klassen</a><a class="${active==='users'?'active':''}" href="#/admin/users">Alle Zugänge</a><a class="${active==='help'?'active':''}" href="#/admin/help">Hilfe anfordern</a><a class="${active==='account'?'active':''}" href="#/admin/account">Eigenes Konto</a></div>`}
 async function renderAllUsers(classes){
   breadcrumbs([{label:'Verwaltung',href:'#/admin'},{label:'Alle Zugänge'}]);
   const users=await api('/api/users');
@@ -317,10 +326,49 @@ async function renderAllUsers(classes){
   };
   $('#account-search').addEventListener('input',renderRows);$('#account-class-filter').addEventListener('change',renderRows);$('#add-user-from-overview').addEventListener('click',()=>chooseManualAccountClassDialog(classes));$('#import-all-users').addEventListener('click',()=>chooseImportClassDialog(classes));$('#delete-multiple-users').addEventListener('click',()=>batchDeleteUsersDialog(users));renderRows();
 }
+function euro(cents){return new Intl.NumberFormat('de-DE',{style:'currency',currency:'EUR'}).format((Number(cents)||0)/100)}
+function defaultLicenseDates(plan='single'){
+  const start=new Date(),end=new Date(start);
+  if(plan==='beta')end.setDate(end.getDate()+55);
+  else{end.setFullYear(end.getFullYear()+1);end.setDate(end.getDate()-1)}
+  return {starts_on:start.toISOString().slice(0,10),ends_on:end.toISOString().slice(0,10)};
+}
+async function renderLicenses(){
+  breadcrumbs([{label:'Verwaltung',href:'#/admin/teachers'},{label:'Bestellungen & Lizenzen'}]);
+  const [licenses,teachers]=await Promise.all([api('/api/licenses'),api('/api/teachers')]);
+  const active=licenses.filter(item=>item.status==='active'),open=licenses.filter(item=>['open','overdue'].includes(item.payment_status));
+  const used=active.reduce((sum,item)=>sum+item.used_seats,0),seats=active.reduce((sum,item)=>sum+item.seat_limit,0);
+  $('#content').innerHTML=pageHeader('Bestellungen & Lizenzen','Lizenzmodelle, Zahlungen, Laufzeiten und zugehörige Lehrkraftzugänge verwalten.','<button class="button primary" id="add-license">Lizenz anlegen</button>')+adminViewTabs('licenses')+
+    `<div class="license-metrics"><article class="card"><span>Aktive Lizenzen</span><strong>${active.length}</strong></article><article class="card"><span>Belegte Zugänge</span><strong>${used} / ${seats}</strong></article><article class="card"><span>Offene Zahlungen</span><strong>${open.length}</strong></article><article class="card"><span>Beta-Zugänge</span><strong>${licenses.filter(item=>item.plan==='beta'&&item.status==='active').length}</strong></article></div>`+
+    (licenses.length?`<div class="table-wrap"><table class="license-table"><thead><tr><th>Kunde / Schule</th><th>Modell</th><th>Laufzeit</th><th>Zugänge</th><th>Zahlung</th><th>Status</th><th>Aktion</th></tr></thead><tbody>${licenses.map(item=>`<tr><td><strong>${esc(item.organization||item.customer_name)}</strong><small>${item.organization?esc(item.customer_name):''}${item.email?`${item.organization?' · ':''}${esc(item.email)}`:''}</small></td><td>${esc(LICENSE_PLANS[item.plan]||item.plan)}<small>${euro(item.amount_cents)}</small></td><td>${fmtDate(item.starts_on)}–${fmtDate(item.ends_on)}</td><td><strong>${item.used_seats} / ${item.seat_limit}</strong><small>${item.teachers.map(teacher=>esc(teacher.first_name)).join(', ')||'Noch nicht zugeordnet'}</small></td><td><span class="status-pill payment-${item.payment_status}">${esc(PAYMENT_STATUS[item.payment_status]||item.payment_status)}</span></td><td><span class="status-pill license-${item.status}">${esc(LICENSE_STATUS[item.status]||item.status)}</span></td><td><button class="button small edit-license" data-id="${item.id}">Bearbeiten</button></td></tr>`).join('')}</tbody></table></div>`:empty('Noch keine Lizenz angelegt','Erfassen Sie Beta-, Einzel-, Fachbereichs- oder Schullizenzen.'));
+  $('#add-license').addEventListener('click',()=>licenseDialog(teachers));
+  $$('.edit-license').forEach(button=>button.addEventListener('click',()=>licenseDialog(teachers,licenses.find(item=>item.id===Number(button.dataset.id)))));
+}
+function licenseTeacherChoices(teachers,selected=[]){
+  const selectedIds=new Set(selected.map(item=>Number(item.id??item)));
+  return teachers.length?`<div class="license-teacher-list">${teachers.map(teacher=>`<label class="class-choice"><input type="checkbox" name="license_teacher" value="${teacher.id}" ${selectedIds.has(teacher.id)?'checked':''}><span><strong>${esc(teacher.first_name)}</strong><small>${esc(teacher.username)}${teacher.active?'':' · Konto gesperrt'}</small></span></label>`).join('')}</div>`:empty('Noch keine Lehrkraftzugänge','Legen Sie zunächst mindestens einen Lehrkraftzugang an.');
+}
+function licenseDialog(teachers,license=null){
+  const editing=Boolean(license),initialPlan=license?.plan||'beta',dates=license||defaultLicenseDates(initialPlan);
+  const defaults={beta:{price:'0.00',seats:1},single:{price:'79.00',seats:1},department:{price:'299.00',seats:5},school:{price:'599.00',seats:15}};
+  const dlg=openDialog(editing?'Lizenz bearbeiten':'Lizenz anlegen',`<form id="license-form" class="stack">
+    <div class="form-grid"><label>Lizenzmodell<select name="plan">${Object.entries(LICENSE_PLANS).map(([key,label])=>`<option value="${key}" ${initialPlan===key?'selected':''}>${esc(label)}</option>`).join('')}</select></label><label>Ansprechperson<input name="customer_name" value="${esc(license?.customer_name||'')}" maxlength="120" required></label></div>
+    <div class="form-grid"><label>Schule / Organisation<input name="organization" value="${esc(license?.organization||'')}" maxlength="160"></label><label>E-Mail-Adresse<input name="email" type="email" value="${esc(license?.email||'')}" maxlength="254"></label></div>
+    <div class="form-grid"><label>Preis in Euro<input name="amount_euros" type="number" min="0" max="1000000" step="0.01" value="${editing?(license.amount_cents/100).toFixed(2):defaults[initialPlan].price}" required></label><label>Lehrkraftplätze<input name="seat_limit" type="number" min="1" max="500" value="${license?.seat_limit||defaults[initialPlan].seats}" required></label></div>
+    <div class="form-grid"><label>Lizenzbeginn<input name="starts_on" type="date" value="${esc(dates.starts_on)}" required></label><label>Lizenzende<input name="ends_on" type="date" value="${esc(dates.ends_on)}" required></label></div>
+    <div class="form-grid"><label>Zahlungsstatus<select name="payment_status">${Object.entries(PAYMENT_STATUS).map(([key,label])=>`<option value="${key}" ${(license?.payment_status||(initialPlan==='beta'?'not_required':'open'))===key?'selected':''}>${esc(label)}</option>`).join('')}</select></label><label>Lizenzstatus<select name="status">${Object.entries(LICENSE_STATUS).map(([key,label])=>`<option value="${key}" ${(license?.status||'draft')===key?'selected':''}>${esc(label)}</option>`).join('')}</select></label></div>
+    <label>Rechnungsanschrift<textarea name="billing_address" maxlength="1000">${esc(license?.billing_address||'')}</textarea></label>
+    <label>Bestellnummer / Leitweg-ID<input name="invoice_reference" value="${esc(license?.invoice_reference||'')}" maxlength="120"></label>
+    <fieldset class="team-assignment"><legend>Zugeordnete Lehrkraftzugänge</legend><p class="muted">Eine Zuordnung macht den Zugang lizenzpflichtig. Ohne aktive Lizenz ist anschließend keine Anmeldung mehr möglich.</p>${licenseTeacherChoices(teachers,license?.teachers||[])}</fieldset>
+    <label>Interne Notizen<textarea name="notes" maxlength="4000">${esc(license?.notes||'')}</textarea></label>
+  </form>`,`<button class="button" value="cancel">Abbrechen</button><button class="button primary" id="save-license" value="none">${editing?'Speichern':'Lizenz anlegen'}</button>`);
+  if(!editing)$('[name=plan]',dlg).addEventListener('change',event=>{const plan=event.target.value,next=defaults[plan],nextDates=defaultLicenseDates(plan);$('[name=amount_euros]',dlg).value=next.price;$('[name=seat_limit]',dlg).value=next.seats;$('[name=starts_on]',dlg).value=nextDates.starts_on;$('[name=ends_on]',dlg).value=nextDates.ends_on;$('[name=payment_status]',dlg).value=plan==='beta'?'not_required':'open'});
+  $('#save-license',dlg).addEventListener('click',async event=>{event.preventDefault();const form=$('#license-form',dlg),amount=Number(field(form,'amount_euros'));if(!Number.isFinite(amount))return toast('Bitte geben Sie einen gültigen Preis ein.',true);const body={plan:field(form,'plan'),customer_name:field(form,'customer_name'),organization:field(form,'organization'),email:field(form,'email'),amount_cents:Math.round(amount*100),seat_limit:Number(field(form,'seat_limit')),starts_on:field(form,'starts_on'),ends_on:field(form,'ends_on'),payment_status:field(form,'payment_status'),status:field(form,'status'),billing_address:field(form,'billing_address'),invoice_reference:field(form,'invoice_reference'),notes:field(form,'notes'),teacher_ids:$$('input[name=license_teacher]:checked',form).map(input=>Number(input.value))};try{await api(editing?`/api/licenses/${license.id}`:'/api/licenses',{method:editing?'PATCH':'POST',body});closeDialog();route();toast(editing?'Lizenz wurde aktualisiert.':'Lizenz wurde angelegt.')}catch(error){toast(error.message,true)}});
+}
 async function renderTeachers(classes){
   breadcrumbs([{label:'Verwaltung',href:'#/admin'},{label:'Lehrkräfte'}]);
   const teachers=await api('/api/teachers');
-  $('#content').innerHTML=pageHeader('Lehrkraftzugänge','Erworbene Lehrkraftzugänge anlegen, freischalten und sperren.','<button class="button primary" id="add-teacher">Lehrkraft anlegen</button>')+adminViewTabs('teachers')+`<div class="grid cards teacher-cards">${teachers.length?teachers.map(teacher=>`<article class="card"><div class="teacher-card-heading"><div><div class="eyebrow">Lehrkraftzugang</div><h3>${esc(teacher.first_name)}</h3><p class="muted">${esc(teacher.username)}</p></div><span class="status-pill ${teacher.active?'active':'inactive'}">${teacher.active?'Freigeschaltet':'Gesperrt'}</span></div><div class="teacher-classes"><strong>Verwaltete Klassen</strong><p>${teacher.class_count} ${teacher.class_count===1?'Klasse':'Klassen'}${teacher.support_active?' · Supportzugriff aktiv':''}</p></div><div class="teacher-card-footer"><small>Letzte Anmeldung: ${fmt(teacher.last_login_at)}</small><button class="button small edit-teacher" data-id="${teacher.id}">Bearbeiten</button></div></article>`).join(''):empty('Noch keine Lehrkraftzugänge','Legen Sie den ersten erworbenen Zugang an.')}</div>`;
+  $('#content').innerHTML=pageHeader('Lehrkraftzugänge','Konten anlegen, technisch sperren und ihrer Lizenz zuordnen.','<button class="button primary" id="add-teacher">Lehrkraft anlegen</button>')+adminViewTabs('teachers')+`<div class="grid cards teacher-cards">${teachers.length?teachers.map(teacher=>{const license=teacher.licenses.find(item=>item.status==='active')||teacher.licenses[0];return `<article class="card"><div class="teacher-card-heading"><div><div class="eyebrow">Lehrkraftzugang</div><h3>${esc(teacher.first_name)}</h3><p class="muted">${esc(teacher.username)}</p></div><span class="status-pill ${teacher.active?'active':'inactive'}">${teacher.active?'Freigeschaltet':'Gesperrt'}</span></div><div class="teacher-classes"><strong>Lizenz</strong><p>${teacher.license_managed?(license?`${esc(LICENSE_PLANS[license.plan]||license.plan)} · ${esc(LICENSE_STATUS[license.status]||license.status)} bis ${fmtDate(license.ends_on)}`:'Keine Lizenz zugeordnet'):'Bestandszugang · noch nicht lizenzgebunden'}${teacher.license_managed&&!teacher.license_valid?' · Anmeldung nicht möglich':''}</p></div><div class="teacher-classes"><strong>Verwaltete Klassen</strong><p>${teacher.class_count} ${teacher.class_count===1?'Klasse':'Klassen'}${teacher.support_active?' · Supportzugriff aktiv':''}</p></div><div class="teacher-card-footer"><small>Letzte Anmeldung: ${fmt(teacher.last_login_at)}</small><button class="button small edit-teacher" data-id="${teacher.id}">Bearbeiten</button></div></article>`}).join(''):empty('Noch keine Lehrkraftzugänge','Legen Sie den ersten Zugang an und ordnen Sie ihn anschließend einer Lizenz zu.')}</div>`;
   $('#add-teacher').addEventListener('click',()=>teacherDialog(classes));
   $$('.edit-teacher').forEach(button=>button.addEventListener('click',()=>teacherDialog(classes,teachers.find(teacher=>teacher.id===Number(button.dataset.id)))));
 }
@@ -334,7 +382,7 @@ function teacherCredentialsDialog(firstName,username,password){
 }
 function teacherDialog(classes,teacher=null){
   const editing=Boolean(teacher);
-  const dlg=openDialog(editing?`Lehrkraft ${teacher.first_name} bearbeiten`:'Lehrkraft anlegen',`<form id="teacher-form" class="stack"><div class="form-grid"><label>Name<input name="first_name" value="${esc(teacher?.first_name||'')}" maxlength="80" required></label><label>Benutzername<input name="username" value="${esc(teacher?.username||'lehrkraft_')}" maxlength="50" autocomplete="off" required><small class="muted">Muss mit „lehrkraft_“ beginnen.</small></label></div>${editing?`<label class="toggle-row"><input type="checkbox" name="active" ${teacher.active?'checked':''}> Anmeldung freigeschaltet</label><div class="info-box">Eine Sperrung beendet laufende Sitzungen. Unterrichtsdaten werden dabei nicht geöffnet oder verändert.${teacher.last_login_at?' Das persönliche Kennwort kann nur die Lehrkraft selbst ändern.':''}</div>`:'<div class="info-box">ProjektKontor erzeugt nach dem Speichern ein Initialkennwort. Klassen und Schülerzugänge legt die Lehrkraft anschließend selbst an.</div>'}</form>`,editing?`<button class="button" value="cancel">Abbrechen</button>${teacher.last_login_at?'':'<button class="button" id="reset-teacher-password" value="none">Neues Initialkennwort</button>'}<button class="button primary" id="save-teacher" value="none">Speichern</button>`:'<button class="button" value="cancel">Abbrechen</button><button class="button primary" id="save-teacher" value="none">Lehrkraft anlegen</button>');
+  const dlg=openDialog(editing?`Lehrkraft ${teacher.first_name} bearbeiten`:'Lehrkraft anlegen',`<form id="teacher-form" class="stack"><div class="form-grid"><label>Name<input name="first_name" value="${esc(teacher?.first_name||'')}" maxlength="80" required></label><label>Benutzername<input name="username" value="${esc(teacher?.username||'lehrkraft_')}" maxlength="50" autocomplete="off" required><small class="muted">Muss mit „lehrkraft_“ beginnen.</small></label></div>${editing?`<label class="toggle-row"><input type="checkbox" name="active" ${teacher.active?'checked':''}> Konto technisch freigeschaltet</label><div class="info-box">Für die Anmeldung müssen sowohl das Konto als auch eine zugeordnete Lizenz aktiv sein. Eine Sperrung beendet laufende Sitzungen. Unterrichtsdaten werden nicht verändert.${teacher.last_login_at?' Das persönliche Kennwort kann nur die Lehrkraft selbst ändern.':''}</div>`:'<div class="info-box">ProjektKontor erzeugt ein Initialkennwort. Ordnen Sie den Zugang anschließend unter „Bestellungen & Lizenzen“ einer aktiven Lizenz zu; erst dann ist die Anmeldung möglich.</div>'}</form>`,editing?`<button class="button" value="cancel">Abbrechen</button>${teacher.last_login_at?'':'<button class="button" id="reset-teacher-password" value="none">Neues Initialkennwort</button>'}<button class="button primary" id="save-teacher" value="none">Speichern</button>`:'<button class="button" value="cancel">Abbrechen</button><button class="button primary" id="save-teacher" value="none">Lehrkraft anlegen</button>');
   const form=$('#teacher-form',dlg);
   const usernameInput=$('[name=username]',form);usernameInput.addEventListener('blur',()=>{if(!usernameInput.value.startsWith('lehrkraft_'))usernameInput.value=`lehrkraft_${usernameInput.value.replace(/^lehrkraft_*/,'')}`});
   const payload=()=>({first_name:field(form,'first_name')?.trim(),username:field(form,'username')?.trim(),...(editing?{active:$('[name=active]',form).checked}:{})});

@@ -42,7 +42,15 @@ from .security import CodeVault, generate_access_code, hash_password, hash_sessi
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 ALLOWED_MEDIA_TYPES = {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 TEAM_COLORS = set(TEAM_COLOR_PALETTE)
-PRIVACY_VERSION = "2026-07-22.2"
+LICENSE_PLANS = {
+    "beta": {"amount_cents": 0, "seat_limit": 1},
+    "single": {"amount_cents": 7900, "seat_limit": 1},
+    "department": {"amount_cents": 29900, "seat_limit": 5},
+    "school": {"amount_cents": 59900, "seat_limit": 15},
+}
+LICENSE_STATUSES = {"draft", "active", "suspended", "expired", "cancelled"}
+PAYMENT_STATUSES = {"not_required", "open", "paid", "overdue", "refunded", "cancelled"}
+PRIVACY_VERSION = "2026-07-24.1"
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
@@ -96,6 +104,17 @@ def parse_project_date(value: Any, field: str, include_time: bool) -> str:
         raise HttpError(400, f"{field} ist ungültig.") from exc
 
 
+def parse_date(value: Any, field: str) -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text[:10]).date()
+    except (TypeError, ValueError) as exc:
+        raise HttpError(400, f"{field} ist ungültig.") from exc
+    if not text or parsed.isoformat() != text:
+        raise HttpError(400, f"{field} ist ungültig.")
+    return text
+
+
 def normalize_due_at(value: Any) -> str | None:
     """A date-only task/upload deadline expires at the end of that day."""
     text = str(value or "").strip()
@@ -146,6 +165,9 @@ class App:
         route("GET", r"/api/teachers")(self.list_teachers)
         route("POST", r"/api/teachers")(self.create_teacher)
         route("PATCH", r"/api/teachers/(?P<teacher_id>\d+)")(self.update_teacher)
+        route("GET", r"/api/licenses")(self.list_licenses)
+        route("POST", r"/api/licenses")(self.create_license)
+        route("PATCH", r"/api/licenses/(?P<license_id>\d+)")(self.update_license)
         route("GET", r"/api/classes")(self.list_classes)
         route("POST", r"/api/classes")(self.create_class)
         route("PATCH", r"/api/classes/(?P<class_id>\d+)")(self.update_class)
@@ -386,12 +408,49 @@ class App:
         user = self.db.one("SELECT id,class_id,first_name,username,role,is_owner,must_change_password,active,last_login_at FROM users WHERE id=? AND active=1", (session["user_id"],))
         if not user:
             return None, None
+        if user["role"] == "teacher" and not user.get("is_owner") and not self.teacher_license_valid(user["id"]):
+            self.db.execute("DELETE FROM sessions WHERE id=?", (session["id"],))
+            return None, None
         return user, session
 
+    def refresh_expired_licenses(self) -> None:
+        today = datetime.now(timezone.utc).date().isoformat()
+        expired = self.db.all("SELECT id FROM licenses WHERE status='active' AND ends_on<?", (today,))
+        if not expired:
+            return
+        ids = [row["id"] for row in expired]
+        placeholders = ",".join("?" for _ in ids)
+        with self.db.transaction() as connection:
+            connection.execute(
+                f"UPDATE licenses SET status='expired',updated_at=? WHERE id IN ({placeholders})",
+                (utcnow(), *ids),
+            )
+
+    def teacher_license_valid(self, teacher_id: int) -> bool:
+        self.refresh_expired_licenses()
+        account = self.db.one(
+            "SELECT license_managed FROM users WHERE id=? AND role='teacher' AND is_owner=0",
+            (teacher_id,),
+        )
+        if not account or not account.get("license_managed"):
+            # Bestandskonten ohne Lizenzzuordnung bleiben nach der Migration
+            # erreichbar, bis der Admin sie erstmals einer Lizenz zuordnet.
+            return True
+        today = datetime.now(timezone.utc).date().isoformat()
+        return bool(self.db.one(
+            """SELECT 1 ok FROM license_teachers lt
+               JOIN licenses l ON l.id=lt.license_id
+               WHERE lt.teacher_id=? AND l.status='active'
+                 AND l.starts_on<=? AND l.ends_on>=? LIMIT 1""",
+            (teacher_id, today, today),
+        ))
+
     def start_session(self, user_id: int) -> tuple[str, str, int]:
-        account = self.db.one("SELECT role FROM users WHERE id=? AND active=1", (user_id,))
+        account = self.db.one("SELECT role,is_owner FROM users WHERE id=? AND active=1", (user_id,))
         if not account:
             raise HttpError(401, "Konto nicht gefunden oder deaktiviert.")
+        if account["role"] == "teacher" and not account.get("is_owner") and not self.teacher_license_valid(user_id):
+            raise HttpError(403, "Der Lehrkraftzugang besitzt derzeit keine aktive Lizenz.")
         duration_hours = 6 if account["role"] == "student" else 12
         max_age = duration_hours * 60 * 60
         token = new_session_token()
@@ -444,6 +503,7 @@ class App:
                     "Inhaltsdaten: Kommentare, Bearbeitungshinweise, Begründungen, Ergebnistexte und hochgeladene PDF- oder Bilddateien.",
                     "Sicherheitsdaten: fehlgeschlagene Anmeldeversuche mit Benutzername, Clientadresse und Zeitpunkt für höchstens 15 Minuten.",
                     "Supportdaten: Telefonnummer, Beschreibung des Anliegens, gehashter Unterstützungscode sowie Beginn, Ende und Widerruf einer zeitlich begrenzten Supportfreigabe.",
+                    "Lizenz- und Vertragsdaten bei Lehrkraftkonten: Schule oder Organisation, Ansprechperson, geschäftliche E-Mail-Adresse, Rechnungsanschrift, Bestellreferenz, Lizenzmodell, Laufzeit, Preis sowie Zahlungs- und Freischaltstatus.",
                     "Nachweis dieser Information: Version und Zeitpunkt der Bestätigung.",
                 ]},
                 {"heading": "Herkunft der Daten", "paragraphs": [
@@ -460,6 +520,7 @@ class App:
                     "Nach Projektabschluss kann ein dauerhafter PDF-Projektbericht erhalten bleiben; operative Aufgaben, Kommentare und Uploads können anschließend gelöscht werden.",
                     "Fehlgeschlagene Anmeldeversuche werden nach 15 Minuten gelöscht.",
                     "Supportanfragen und die darin angegebene Telefonnummer werden spätestens 30 Tage nach ihrer Erstellung gelöscht; der eigentliche Datenzugriff endet spätestens zwei Stunden nach Einlösung des Codes.",
+                    "Lizenz-, Bestell- und Abrechnungsdaten werden entsprechend der vertraglichen und gesetzlichen Aufbewahrungspflichten gespeichert.",
                     "Reguläre Sicherungen werden nach 14 Tagen ersetzt, sofern der Betreiber keine abweichende, dokumentierte Frist festlegt.",
                     "Die Bestätigung dieser Datenschutzinformation bleibt so lange gespeichert, wie das zugehörige Konto besteht.",
                 ]},
@@ -479,6 +540,8 @@ class App:
 
     def authenticated_login_result(self, user_id: int) -> Any:
         account = self.db.one("SELECT role,is_owner,must_change_password FROM users WHERE id=? AND active=1", (user_id,))
+        if account and account["role"] == "teacher" and not account.get("is_owner") and not self.teacher_license_valid(user_id):
+            raise HttpError(403, "Der Lehrkraftzugang besitzt derzeit keine aktive Lizenz. Bitte wenden Sie sich an die ProjektKontor-Verwaltung.")
         if account and account["role"] == "teacher" and not account.get("is_owner") and account.get("must_change_password"):
             token = new_session_token()
             expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(timespec="seconds")
@@ -850,16 +913,200 @@ class App:
         except (OSError, smtplib.SMTPException) as exc:
             raise HttpError(503, "Die Supportanfrage konnte gerade nicht versendet werden.") from exc
 
+    def license_record(self, license_id: int) -> dict[str, Any] | None:
+        record = self.db.one(
+            """SELECT l.id,l.order_id,l.seat_limit,l.starts_on,l.ends_on,l.status,
+                      l.created_at,l.updated_at,o.customer_name,o.organization,o.email,
+                      o.billing_address,o.invoice_reference,o.plan,o.amount_cents,
+                      o.payment_status,o.notes
+               FROM licenses l JOIN license_orders o ON o.id=l.order_id
+               WHERE l.id=?""",
+            (license_id,),
+        )
+        if not record:
+            return None
+        record["teachers"] = self.db.all(
+            """SELECT u.id,u.first_name,u.username,u.active
+               FROM license_teachers lt JOIN users u ON u.id=lt.teacher_id
+               WHERE lt.license_id=? ORDER BY u.first_name,u.username""",
+            (license_id,),
+        )
+        record["used_seats"] = len(record["teachers"])
+        return record
+
+    def list_licenses(self, environ, user):
+        self.require_owner(user)
+        self.refresh_expired_licenses()
+        rows = self.db.all("SELECT id FROM licenses ORDER BY created_at DESC,id DESC")
+        return [self.license_record(row["id"]) for row in rows]
+
+    def parse_license_payload(self, data: dict[str, Any], current: dict[str, Any] | None = None) -> dict[str, Any]:
+        plan = str(data.get("plan", current["plan"] if current else "")).strip()
+        if plan not in LICENSE_PLANS:
+            raise HttpError(400, "Bitte wählen Sie ein gültiges Lizenzmodell.")
+        customer_name = str(data.get("customer_name", current["customer_name"] if current else "")).strip()
+        organization = str(data.get("organization", current["organization"] if current else "")).strip()
+        email = str(data.get("email", current["email"] if current else "")).strip().lower()
+        billing_address = str(data.get("billing_address", current["billing_address"] if current else "")).strip()
+        invoice_reference = str(data.get("invoice_reference", current["invoice_reference"] if current else "")).strip()
+        notes = str(data.get("notes", current["notes"] if current else "")).strip()
+        if not 2 <= len(customer_name) <= 120:
+            raise HttpError(400, "Bitte geben Sie eine Ansprechperson mit 2 bis 120 Zeichen an.")
+        if len(organization) > 160 or len(billing_address) > 1000 or len(invoice_reference) > 120 or len(notes) > 4000:
+            raise HttpError(400, "Eine Angabe überschreitet die zulässige Länge.")
+        if email and (parseaddr(email)[1] != email or len(email) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email)):
+            raise HttpError(400, "Bitte geben Sie eine gültige E-Mail-Adresse an.")
+        try:
+            amount_cents = int(data.get("amount_cents", current["amount_cents"] if current else LICENSE_PLANS[plan]["amount_cents"]))
+            seat_limit = int(data.get("seat_limit", current["seat_limit"] if current else LICENSE_PLANS[plan]["seat_limit"]))
+        except (TypeError, ValueError) as exc:
+            raise HttpError(400, "Preis oder Anzahl der Zugänge ist ungültig.") from exc
+        if not 0 <= amount_cents <= 100_000_000 or not 1 <= seat_limit <= 500:
+            raise HttpError(400, "Preis oder Anzahl der Zugänge liegt außerhalb des zulässigen Bereichs.")
+        starts_on = parse_date(data.get("starts_on", current["starts_on"] if current else ""), "Lizenzbeginn")
+        ends_on = parse_date(data.get("ends_on", current["ends_on"] if current else ""), "Lizenzende")
+        if ends_on < starts_on:
+            raise HttpError(400, "Das Lizenzende darf nicht vor dem Beginn liegen.")
+        status = str(data.get("status", current["status"] if current else "draft")).strip()
+        payment_status = str(data.get("payment_status", current["payment_status"] if current else ("not_required" if plan == "beta" else "open"))).strip()
+        if status not in LICENSE_STATUSES or payment_status not in PAYMENT_STATUSES:
+            raise HttpError(400, "Lizenz- oder Zahlungsstatus ist ungültig.")
+        today = datetime.now(timezone.utc).date().isoformat()
+        if status == "active" and ends_on < today:
+            status = "expired"
+        raw_teacher_ids = data.get("teacher_ids")
+        if raw_teacher_ids is None and current:
+            teacher_ids = [teacher["id"] for teacher in current["teachers"]]
+        else:
+            try:
+                teacher_ids = list(dict.fromkeys(int(value) for value in (raw_teacher_ids or [])))
+            except (TypeError, ValueError) as exc:
+                raise HttpError(400, "Die Auswahl der Lehrkraftzugänge ist ungültig.") from exc
+        if len(teacher_ids) > seat_limit:
+            raise HttpError(400, f"Für diese Lizenz sind höchstens {seat_limit} Lehrkraftzugänge vorgesehen.")
+        if teacher_ids:
+            placeholders = ",".join("?" for _ in teacher_ids)
+            accounts = self.db.all(
+                f"SELECT id FROM users WHERE id IN ({placeholders}) AND role='teacher' AND is_owner=0",
+                tuple(teacher_ids),
+            )
+            if len(accounts) != len(teacher_ids):
+                raise HttpError(400, "Mindestens ein ausgewählter Lehrkraftzugang ist ungültig.")
+        return {
+            "customer_name": customer_name, "organization": organization, "email": email,
+            "billing_address": billing_address, "invoice_reference": invoice_reference,
+            "plan": plan, "amount_cents": amount_cents, "payment_status": payment_status,
+            "notes": notes, "seat_limit": seat_limit, "starts_on": starts_on,
+            "ends_on": ends_on, "status": status, "teacher_ids": teacher_ids,
+        }
+
+    def ensure_license_assignments_available(self, values: dict[str, Any], license_id: int | None = None) -> None:
+        if values["status"] != "active":
+            return
+        for teacher_id in values["teacher_ids"]:
+            params: list[Any] = [teacher_id, values["ends_on"], values["starts_on"]]
+            sql = """SELECT l.id FROM license_teachers lt JOIN licenses l ON l.id=lt.license_id
+                     WHERE lt.teacher_id=? AND l.status='active'
+                       AND l.starts_on<=? AND l.ends_on>=?"""
+            if license_id is not None:
+                sql += " AND l.id<>?"
+                params.append(license_id)
+            if self.db.one(sql + " LIMIT 1", tuple(params)):
+                raise HttpError(409, "Mindestens ein Lehrkraftzugang ist bereits einer zeitlich überschneidenden aktiven Lizenz zugeordnet.")
+
+    def create_license(self, environ, user):
+        self.require_owner(user)
+        values = self.parse_license_payload(self.body(environ))
+        self.ensure_license_assignments_available(values)
+        now = utcnow()
+        with self.db.transaction() as connection:
+            order = connection.execute(
+                """INSERT INTO license_orders(customer_name,organization,email,billing_address,
+                   invoice_reference,plan,amount_cents,payment_status,notes,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (values["customer_name"], values["organization"], values["email"], values["billing_address"],
+                 values["invoice_reference"], values["plan"], values["amount_cents"],
+                 values["payment_status"], values["notes"], now, now),
+            )
+            license_row = connection.execute(
+                """INSERT INTO licenses(order_id,seat_limit,starts_on,ends_on,status,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (int(order.lastrowid), values["seat_limit"], values["starts_on"], values["ends_on"],
+                 values["status"], now, now),
+            )
+            license_id = int(license_row.lastrowid)
+            for teacher_id in values["teacher_ids"]:
+                connection.execute(
+                    "INSERT INTO license_teachers(license_id,teacher_id,assigned_at) VALUES(?,?,?)",
+                    (license_id, teacher_id, now),
+                )
+                connection.execute("UPDATE users SET license_managed=1 WHERE id=?", (teacher_id,))
+        return self.license_record(license_id)
+
+    def update_license(self, environ, user, license_id):
+        self.require_owner(user)
+        current = self.license_record(license_id)
+        if not current:
+            raise HttpError(404, "Lizenz nicht gefunden.")
+        values = self.parse_license_payload(self.body(environ), current)
+        self.ensure_license_assignments_available(values, license_id)
+        now = utcnow()
+        previous_teacher_ids = {teacher["id"] for teacher in current["teachers"]}
+        affected_teacher_ids = previous_teacher_ids | set(values["teacher_ids"])
+        access_changed = (
+            current["status"] != values["status"]
+            or current["starts_on"] != values["starts_on"]
+            or current["ends_on"] != values["ends_on"]
+            or previous_teacher_ids != set(values["teacher_ids"])
+        )
+        with self.db.transaction() as connection:
+            connection.execute(
+                """UPDATE license_orders SET customer_name=?,organization=?,email=?,billing_address=?,
+                   invoice_reference=?,plan=?,amount_cents=?,payment_status=?,notes=?,updated_at=?
+                   WHERE id=?""",
+                (values["customer_name"], values["organization"], values["email"], values["billing_address"],
+                 values["invoice_reference"], values["plan"], values["amount_cents"],
+                 values["payment_status"], values["notes"], now, current["order_id"]),
+            )
+            connection.execute(
+                "UPDATE licenses SET seat_limit=?,starts_on=?,ends_on=?,status=?,updated_at=? WHERE id=?",
+                (values["seat_limit"], values["starts_on"], values["ends_on"], values["status"], now, license_id),
+            )
+            connection.execute("DELETE FROM license_teachers WHERE license_id=?", (license_id,))
+            for teacher_id in values["teacher_ids"]:
+                connection.execute(
+                    "INSERT INTO license_teachers(license_id,teacher_id,assigned_at) VALUES(?,?,?)",
+                    (license_id, teacher_id, now),
+                )
+                connection.execute("UPDATE users SET license_managed=1 WHERE id=?", (teacher_id,))
+            if affected_teacher_ids and access_changed:
+                placeholders = ",".join("?" for _ in affected_teacher_ids)
+                connection.execute(
+                    f"DELETE FROM sessions WHERE user_id IN ({placeholders})",
+                    tuple(affected_teacher_ids),
+                )
+        return self.license_record(license_id)
+
     def list_teachers(self, environ, user):
         self.require_owner(user)
         teachers = self.db.all(
-            """SELECT u.id,u.first_name,u.username,u.is_owner,u.active,u.last_login_at,u.created_at,
+            """SELECT u.id,u.first_name,u.username,u.is_owner,u.active,u.license_managed,u.last_login_at,u.created_at,
                       (SELECT COUNT(*) FROM teacher_classes tc WHERE tc.teacher_id=u.id) class_count,
                       EXISTS(SELECT 1 FROM support_requests sr WHERE sr.teacher_id=u.id AND sr.status='active'
                         AND sr.access_expires_at>?) support_active
                FROM users u WHERE u.role='teacher' AND u.is_owner=0 ORDER BY u.first_name,u.username""",
             (utcnow(),),
         )
+        self.refresh_expired_licenses()
+        for teacher in teachers:
+            teacher["licenses"] = self.db.all(
+                """SELECT l.id,l.status,l.starts_on,l.ends_on,o.plan,o.organization
+                   FROM license_teachers lt JOIN licenses l ON l.id=lt.license_id
+                   JOIN license_orders o ON o.id=l.order_id
+                   WHERE lt.teacher_id=? ORDER BY l.ends_on DESC,l.id DESC""",
+                (teacher["id"],),
+            )
+            teacher["license_valid"] = self.teacher_license_valid(teacher["id"])
         return teachers
 
     def create_teacher(self, environ, user):
@@ -877,7 +1124,7 @@ class App:
         try:
             with self.db.transaction() as connection:
                 cursor = connection.execute(
-                    "INSERT INTO users(first_name,username,credential,role,is_owner,must_change_password,active,created_at) VALUES(?,?,?,?,0,1,1,?)",
+                    "INSERT INTO users(first_name,username,credential,role,is_owner,must_change_password,license_managed,active,created_at) VALUES(?,?,?,?,0,1,1,1,?)",
                     (first_name, username, hash_password(initial_password), "teacher", utcnow()),
                 )
                 teacher_id = int(cursor.lastrowid)

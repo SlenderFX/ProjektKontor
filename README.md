@@ -26,6 +26,15 @@ persönliches Administrationskonto eingerichtet. Eine Selbstregistrierung gibt
 es nicht: Der Admin legt Lehrkraftkonten an; jede Lehrkraft verwaltet danach
 ihre eigenen Klassen und Schülerzugänge.
 
+Der Adminbereich enthält außerdem „Bestellungen & Lizenzen“. Dort werden Beta-,
+Einzel-, Fachbereichs- und Schullizenzen mit Preis, Zahlungsstatus, Laufzeit,
+Platzanzahl und zugeordneten Lehrkraftkonten verwaltet. Sobald ein
+Lehrkraftkonto erstmals einer Lizenz zugeordnet wurde, ist für seine Anmeldung
+eine aktive und aktuell gültige Lizenz erforderlich. Eine Sperrung oder ein
+Ablauf beendet den Zugang, löscht aber keine Unterrichtsdaten. Bereits
+vorhandene Konten ohne Lizenzzuordnung bleiben bei der Migration zunächst als
+Bestandszugänge erreichbar.
+
 Für einen schnellen Test ohne Installation kann der von Codex bereitgestellte
 Python verwendet werden, sofern die Abhängigkeiten dort vorhanden sind.
 

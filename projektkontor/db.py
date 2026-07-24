@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL CHECK(role IN ('teacher','student')),
     is_owner INTEGER NOT NULL DEFAULT 0,
     must_change_password INTEGER NOT NULL DEFAULT 0,
+    license_managed INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     last_login_at TEXT,
     created_at TEXT NOT NULL
@@ -297,6 +298,39 @@ CREATE TABLE IF NOT EXISTS support_requests (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS license_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_name TEXT NOT NULL,
+    organization TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    billing_address TEXT NOT NULL DEFAULT '',
+    invoice_reference TEXT NOT NULL DEFAULT '',
+    plan TEXT NOT NULL CHECK(plan IN ('beta','single','department','school')),
+    amount_cents INTEGER NOT NULL DEFAULT 0 CHECK(amount_cents >= 0),
+    payment_status TEXT NOT NULL DEFAULT 'open' CHECK(payment_status IN ('not_required','open','paid','overdue','refunded','cancelled')),
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS licenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL UNIQUE REFERENCES license_orders(id) ON DELETE RESTRICT,
+    seat_limit INTEGER NOT NULL CHECK(seat_limit BETWEEN 1 AND 500),
+    starts_on TEXT NOT NULL,
+    ends_on TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','active','suspended','expired','cancelled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS license_teachers (
+    license_id INTEGER NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+    teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    assigned_at TEXT NOT NULL,
+    PRIMARY KEY(license_id, teacher_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_team ON tasks(team_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(project_id, status_key);
@@ -308,6 +342,9 @@ CREATE INDEX IF NOT EXISTS idx_pending_logins_user ON pending_logins(user_id,exp
 CREATE INDEX IF NOT EXISTS idx_deadline_requests_task ON deadline_requests(task_id,status);
 CREATE INDEX IF NOT EXISTS idx_teacher_classes_class ON teacher_classes(class_id,teacher_id);
 CREATE INDEX IF NOT EXISTS idx_support_requests_teacher ON support_requests(teacher_id,status,access_expires_at);
+CREATE INDEX IF NOT EXISTS idx_license_orders_status ON license_orders(payment_status,plan);
+CREATE INDEX IF NOT EXISTS idx_licenses_status_dates ON licenses(status,starts_on,ends_on);
+CREATE INDEX IF NOT EXISTS idx_license_teachers_teacher ON license_teachers(teacher_id,license_id);
 """
 
 
@@ -344,6 +381,8 @@ class Database:
                 connection.execute("ALTER TABLE users ADD COLUMN is_owner INTEGER NOT NULL DEFAULT 0")
             if "must_change_password" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+            if "license_managed" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN license_managed INTEGER NOT NULL DEFAULT 0")
             # Seit Version 2 sind Plattform-Admin und Lehrkraft getrennte
             # Konten. Frühere globale Lehrkraftkonten bleiben Lehrkraftkonten;
             # anschließend kann einmalig ein eigener Admin eingerichtet werden.

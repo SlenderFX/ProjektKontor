@@ -84,6 +84,14 @@ class AppFlowTest(unittest.TestCase):
             "first_name": "Jeroen", "username": username
         })
         self.assertEqual(status, 200)
+        status, _, _ = client.request("POST", "/api/licenses", {
+            "customer_name": "Testlizenz", "organization": "Testschule",
+            "plan": "beta", "seat_limit": 1, "amount_cents": 0,
+            "payment_status": "not_required", "status": "active",
+            "starts_on": "2020-01-01", "ends_on": "2099-12-31",
+            "teacher_ids": [teacher["id"]],
+        })
+        self.assertEqual(status, 200)
         client.request("POST", "/api/logout", {})
         status, _, _ = client.request("POST", "/api/login", {
             "login_type": "teacher", "username": username, "password": teacher["initial_password"]
@@ -541,6 +549,71 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(result["user"]["username"], "lehrkraft_neu")
 
+    def test_admin_manages_paid_licenses_and_license_access(self):
+        admin = Client(self.app)
+        status, _, _ = admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        self.assertEqual(status, 200)
+        _, first, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Erika", "username": "lehrkraft_erika"
+        })
+        _, second, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Markus", "username": "lehrkraft_markus"
+        })
+
+        status, rejected, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Schulleitung", "organization": "Beispiel-BK",
+            "plan": "single", "seat_limit": 1, "amount_cents": 7900,
+            "payment_status": "paid", "status": "active",
+            "starts_on": "2026-01-01", "ends_on": "2099-12-31",
+            "teacher_ids": [first["id"], second["id"]],
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("höchstens 1", rejected["error"])
+
+        status, license_record, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Frau Beispiel", "organization": "Beispiel-BK",
+            "email": "verwaltung@example.org", "billing_address": "Schulweg 1\n12345 Beispielstadt",
+            "invoice_reference": "BEST-2026-17", "plan": "department",
+            "seat_limit": 5, "amount_cents": 29900, "payment_status": "paid",
+            "status": "active", "starts_on": "2026-01-01", "ends_on": "2099-12-31",
+            "teacher_ids": [first["id"], second["id"]],
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(license_record["used_seats"], 2)
+        self.assertEqual(license_record["plan"], "department")
+        self.assertEqual(self.app.db.one("SELECT license_managed FROM users WHERE id=?", (first["id"],))["license_managed"], 1)
+
+        status, licenses, _ = admin.request("GET", "/api/licenses")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(licenses), 1)
+        self.assertEqual(licenses[0]["organization"], "Beispiel-BK")
+
+        teacher = Client(self.app)
+        status, _, _ = teacher.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "lehrkraft_erika", "password": first["initial_password"]
+        })
+        self.assertEqual(status, 200)
+        status, bootstrap, _ = teacher.request("GET", "/api/bootstrap")
+        self.assertEqual(status, 200)
+        self.assertEqual(bootstrap["user"]["first_name"], "Erika")
+
+        status, updated, _ = admin.request("PATCH", f"/api/licenses/{license_record['id']}", {
+            "status": "suspended",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["status"], "suspended")
+        status, bootstrap, _ = teacher.request("GET", "/api/bootstrap")
+        self.assertEqual(status, 200)
+        self.assertIsNone(bootstrap["user"])
+        status, denied, _ = teacher.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "lehrkraft_erika", "password": TEST_TEACHER_PASSWORD
+        })
+        self.assertEqual(status, 403)
+        self.assertIn("keine aktive Lizenz", denied["error"])
+        self.assertEqual(self.app.db.one("SELECT active FROM users WHERE id=?", (first["id"],))["active"], 1)
+
     def test_security_headers_and_malformed_image_rejection(self):
         status, _, headers = self.client.request("GET", "/api/health")
         self.assertEqual(status, 200)
@@ -555,6 +628,9 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b'href="#/projects/${id}/${key}"', app_script)
         self.assertIn(b'id="add-user-from-overview"', app_script)
         self.assertIn(b"chooseManualAccountClassDialog", app_script)
+        self.assertIn(b'href="#/admin/licenses">Bestellungen &amp; Lizenzen</a>', app_script)
+        self.assertIn(b"async function renderLicenses()", app_script)
+        self.assertIn(b"Zugeordnete Lehrkraftzug\xc3\xa4nge", app_script)
         self.assertIn(b'<button class="button primary" id="add-user">Zugang manuell anlegen</button>', app_script)
         with self.assertRaises(Exception) as rejected:
             self.app.validated_upload({
@@ -613,6 +689,8 @@ class AppFlowTest(unittest.TestCase):
         status, login, _ = self.client.request("GET", "/login")
         self.assertEqual(status, 200)
         self.assertIn(b'id="login-form"', login)
+        self.assertIn(b'href="/">', login)
+        self.assertIn(b"Zur ProjektKontor-Produktseite", login)
         self.assertIn(b'content="noindex,nofollow,noarchive,nosnippet"', login)
         status, sitemap, _ = self.client.request("GET", "/sitemap.xml")
         self.assertEqual(status, 200)
@@ -774,6 +852,13 @@ class AppFlowTest(unittest.TestCase):
         _, teacher, _ = self.client.request("POST", "/api/teachers", {
             "first_name": "Frau Meyer", "username": "lehrkraft_meyer"
         })
+        status, _, _ = self.client.request("POST", "/api/licenses", {
+            "customer_name": "Testlizenz", "plan": "beta", "seat_limit": 1,
+            "amount_cents": 0, "payment_status": "not_required", "status": "active",
+            "starts_on": "2020-01-01", "ends_on": "2099-12-31",
+            "teacher_ids": [teacher["id"]],
+        })
+        self.assertEqual(status, 200)
         self.assertEqual(self.app.db.one("SELECT must_change_password FROM users WHERE id=?", (teacher["id"],))["must_change_password"], 1)
         teacher_client = Client(self.app)
         teacher_client.request("POST", "/api/login", {
@@ -873,6 +958,13 @@ class AppFlowTest(unittest.TestCase):
         })
         status, teacher, _ = admin.request("POST", "/api/teachers", {
             "first_name": "Frau Meyer", "username": "lehrkraft_meyer"
+        })
+        self.assertEqual(status, 200)
+        status, _, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Testlizenz", "plan": "beta", "seat_limit": 1,
+            "amount_cents": 0, "payment_status": "not_required", "status": "active",
+            "starts_on": "2020-01-01", "ends_on": "2099-12-31",
+            "teacher_ids": [teacher["id"]],
         })
         self.assertEqual(status, 200)
         teacher_client = Client(self.app)
