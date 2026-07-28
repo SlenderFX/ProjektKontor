@@ -24,6 +24,7 @@ from .db import Database
 NAVY = colors.HexColor("#0F2E5D")
 SAGE = colors.HexColor("#6F8B74")
 LIGHT = colors.HexColor("#E6E9ED")
+PRIME_PETROL = colors.HexColor("#375F79")
 PRIMEADVISORY_LOGO_B64 = Path(__file__).resolve().parent / "static" / "primeadvisory-logo.png.b64"
 
 
@@ -51,7 +52,7 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(
         name="InvoiceTitle", parent=styles["Heading1"], fontSize=21, leading=24,
-        textColor=NAVY, spaceAfter=2 * mm,
+        textColor=PRIME_PETROL, spaceAfter=2 * mm,
     ))
     styles.add(ParagraphStyle(
         name="InvoiceRight", parent=styles["BodyText"], alignment=TA_RIGHT,
@@ -97,7 +98,7 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("LEFTPADDING", (0, 0), (0, 0), 0),
-        ("LINEBELOW", (0, 0), (-1, 0), 1.0, SAGE),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.0, PRIME_PETROL),
         ("BOTTOMPADDING", (0, 0), (-1, 0), 5 * mm),
     ]))
 
@@ -121,7 +122,7 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     detail_table = Table(details, colWidths=[30 * mm, 45 * mm])
     detail_table.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-        ("TEXTCOLOR", (0, 0), (0, -1), NAVY),
+        ("TEXTCOLOR", (0, 0), (0, -1), PRIME_PETROL),
         ("FONTSIZE", (0, 0), (-1, -1), 8.5),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
@@ -153,8 +154,8 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     items = Table(item_rows, colWidths=[90 * mm, 45 * mm, 35 * mm], repeatRows=1)
     items.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), LIGHT),
-        ("TEXTCOLOR", (0, 0), (-1, 0), NAVY),
-        ("LINEBELOW", (0, 0), (-1, 0), 0.6, SAGE),
+        ("TEXTCOLOR", (0, 0), (-1, 0), PRIME_PETROL),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.6, PRIME_PETROL),
         ("LINEBELOW", (0, 1), (-1, 1), 0.4, LIGHT),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ALIGN", (2, 0), (2, -1), "RIGHT"),
@@ -171,10 +172,10 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     totals = Table(totals_rows, colWidths=[45 * mm, 35 * mm], hAlign="RIGHT")
     totals.setStyle(TableStyle([
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("TEXTCOLOR", (0, -1), (-1, -1), NAVY),
+        ("TEXTCOLOR", (0, -1), (-1, -1), PRIME_PETROL),
         ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
         ("FONTSIZE", (0, -1), (-1, -1), 11),
-        ("LINEABOVE", (0, -1), (-1, -1), 1.2, NAVY),
+        ("LINEABOVE", (0, -1), (-1, -1), 1.2, PRIME_PETROL),
         ("TOPPADDING", (0, -1), (-1, -1), 7),
     ]))
 

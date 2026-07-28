@@ -552,6 +552,11 @@ class Database:
                     utcnow(),
                 ),
             )
+            # Frühere Versionen behielten trotz Kleinunternehmerregelung den
+            # Regelsatz als Nebenwert. § 19 UStG wird nun eindeutig abgebildet.
+            connection.execute(
+                "UPDATE invoice_settings SET vat_rate_basis_points=0 WHERE tax_mode='small_business'"
+            )
             # Ab Version 3 benötigen sämtliche Lehrkraftkonten eine aktive
             # Lizenz; alte Bestandskonten werden nicht mehr stillschweigend
             # freigeschaltet.

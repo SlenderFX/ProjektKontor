@@ -1278,6 +1278,10 @@ class App:
             raise HttpError(400, "Die E-Mail-Adresse des Rechnungsstellers ist ungültig.")
         if tax_mode not in {"small_business", "standard"} or not 0 <= vat_rate_basis_points <= 10000:
             raise HttpError(400, "Die umsatzsteuerliche Einstellung ist ungültig.")
+        if tax_mode == "small_business":
+            # Bei Anwendung des § 19 UStG darf ein parallel gespeicherter
+            # Regelsatz weder in die Berechnung noch in den Beleg gelangen.
+            vat_rate_basis_points = 0
         if not re.fullmatch(r"[A-Z0-9-]{1,12}", invoice_prefix):
             raise HttpError(400, "Das Rechnungspräfix darf nur Großbuchstaben, Ziffern und Bindestriche enthalten.")
         if payment_terms_days not in {0, 7, 14, 30}:
@@ -1325,30 +1329,32 @@ class App:
         settings = self.db.one("SELECT * FROM invoice_settings WHERE id=1")
         if not settings or not settings["business_name"] or not settings["address"] or not settings["tax_identifier"]:
             raise HttpError(400, "Vervollständigen Sie zunächst die Angaben zum Rechnungssteller.")
-        if not is_zero_invoice and not settings["iban"]:
-            raise HttpError(400, "Ergänzen Sie vor der Rechnungserstellung die Bankverbindung des Rechnungsstellers.")
         issued = datetime.now(timezone.utc).date()
-        due = issued + timedelta(days=settings["payment_terms_days"])
         gross_cents = int(license_record["amount_cents"])
-        if is_zero_invoice:
-            net_cents = 0
-            vat_cents = 0
-            vat_rate = 0
-            tax_note = "Kostenfreie Leistung. Es wird kein Entgelt berechnet."
-        elif settings["tax_mode"] == "standard" and settings["vat_rate_basis_points"] > 0:
-            net_cents = round(gross_cents * 10000 / (10000 + settings["vat_rate_basis_points"]))
-            vat_cents = gross_cents - net_cents
-            vat_rate = settings["vat_rate_basis_points"]
-            tax_note = ""
-        else:
-            net_cents = gross_cents
-            vat_cents = 0
-            vat_rate = 0
-            tax_note = "Steuerbefreiung für Kleinunternehmer gemäß § 19 UStG."
         now = utcnow()
         stored_name = ""
         with self.db.transaction() as connection:
             locked_settings = dict(connection.execute("SELECT * FROM invoice_settings WHERE id=1").fetchone())
+            if not is_zero_invoice and not locked_settings["iban"]:
+                raise HttpError(400, "Ergänzen Sie vor der Rechnungserstellung die Bankverbindung des Rechnungsstellers.")
+            due = issued + timedelta(days=locked_settings["payment_terms_days"])
+            if is_zero_invoice:
+                net_cents = 0
+                vat_cents = 0
+                vat_rate = 0
+                tax_note = "Kostenfreie Leistung. Es wird kein Entgelt berechnet."
+            elif locked_settings["tax_mode"] == "standard" and locked_settings["vat_rate_basis_points"] > 0:
+                net_cents = round(
+                    gross_cents * 10000 / (10000 + locked_settings["vat_rate_basis_points"])
+                )
+                vat_cents = gross_cents - net_cents
+                vat_rate = locked_settings["vat_rate_basis_points"]
+                tax_note = ""
+            else:
+                net_cents = gross_cents
+                vat_cents = 0
+                vat_rate = 0
+                tax_note = "Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."
             invoice_number = f"{locked_settings['invoice_prefix']}-{issued.year}-{locked_settings['next_invoice_number']:04d}"
             stored_name = f"rechnung-{invoice_number.lower()}.pdf"
             snapshot = {
