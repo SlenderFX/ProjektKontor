@@ -627,7 +627,22 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "application/pdf")
         self.assertTrue(invoice_pdf.startswith(b"%PDF-"))
+        self.assertIn(b"%%EOF", invoice_pdf[-1024:])
         self.assertGreater(len(invoice_pdf), 2000)
+        object.__setattr__(self.app.config, "smtp_host", "mail.gmx.net")
+        object.__setattr__(self.app.config, "smtp_username", "konto@gmx.de")
+        object.__setattr__(self.app.config, "smtp_password", "anwendungspasswort")
+        object.__setattr__(self.app.config, "smtp_sender", "abweichend@example.org")
+        with patch("projektkontor.server.smtplib.SMTP_SSL") as smtp:
+            smtp.return_value.__enter__.return_value = smtp.return_value
+            status, sent, _ = admin.request("POST", f"/api/invoices/{invoice['id']}/email", {})
+            self.assertEqual(status, 200)
+            self.assertTrue(sent["ok"])
+            message = smtp.return_value.send_message.call_args.args[0]
+        self.assertIn("konto@gmx.de", message["From"])
+        self.assertEqual(message["To"], "verwaltung@example.org")
+        self.assertEqual(message["Reply-To"], "abweichend@example.org")
+        self.assertEqual(message.get_content_maintype(), "multipart")
 
         teacher = Client(self.app)
         status, _, _ = teacher.request("POST", "/api/login", {
@@ -783,6 +798,40 @@ class AppFlowTest(unittest.TestCase):
         updated = next(item for item in licenses if item["id"] == beta["id"])
         self.assertEqual(len(updated["invoices"]), 2)
 
+    def test_assigning_a_teacher_to_another_license_transfers_the_assignment(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        _, teacher, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Erika", "username": "lehrkraft_erika"
+        })
+        common = {
+            "customer_name": "Erika", "plan": "single", "billing_cycle": "annual",
+            "seat_limit": 1, "amount_cents": 7900, "payment_status": "paid",
+            "status": "active", "starts_on": "2026-01-01", "ends_on": "2099-12-31",
+        }
+        status, first, _ = admin.request("POST", "/api/licenses", {
+            **common, "organization": "Alte Schule", "teacher_ids": [teacher["id"]],
+        })
+        self.assertEqual(status, 200)
+        status, second, _ = admin.request("POST", "/api/licenses", {
+            **common, "organization": "Neue Schule", "teacher_ids": [],
+        })
+        self.assertEqual(status, 200)
+        status, second, _ = admin.request("PATCH", f"/api/licenses/{second['id']}", {
+            "organization": "Neue Schule – aktualisiert", "teacher_ids": [teacher["id"]],
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(second["organization"], "Neue Schule – aktualisiert")
+        self.assertEqual(second["used_seats"], 1)
+        refreshed_first = self.app.license_record(first["id"])
+        self.assertEqual(refreshed_first["used_seats"], 0)
+        assignment = self.app.db.one(
+            "SELECT license_id FROM license_teachers WHERE teacher_id=?", (teacher["id"],)
+        )
+        self.assertEqual(assignment["license_id"], second["id"])
+
     def test_security_headers_and_malformed_image_rejection(self):
         status, _, headers = self.client.request("GET", "/api/health")
         self.assertEqual(status, 200)
@@ -804,6 +853,9 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"new:monthly", app_script)
         self.assertIn(b"/api/invoice-settings", app_script)
         self.assertIn(b"Rechnung erstellen", app_script)
+        self.assertIn(b"PDF herunterladen", app_script)
+        self.assertIn(b"Lizenzdetails", app_script)
+        self.assertIn(b"Konto & Zuordnung", app_script)
         self.assertIn(b'<option value="0"', app_script)
         self.assertIn(b">Sofort</option>", app_script)
         self.assertIn(b">30 Tage</option>", app_script)

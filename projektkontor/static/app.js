@@ -337,7 +337,17 @@ function defaultLicenseDates(plan='single',billingCycle='annual'){
 }
 function licenseInvoices(item){
   const invoices=item.invoices||[];
-  return `<div class="invoice-list">${invoices.map(invoice=>`<div class="invoice-entry"><strong>${esc(invoice.invoice_number)}</strong><small>${euro(invoice.gross_cents)} · Gedruckt/offen${invoice.emailed_at?` · versendet ${fmt(invoice.emailed_at)}`:''}</small><div class="row-actions"><a class="button small" href="/api/invoices/${invoice.id}" download>PDF</a><button class="button small email-invoice" data-id="${invoice.id}" ${item.email?'':'disabled title="E-Mail-Adresse fehlt"'}>Per E-Mail</button></div></div>`).join('')}</div><button class="button small create-invoice" data-id="${item.id}" ${item.billing_address?'':'disabled title="Rechnungsanschrift fehlt"'}>${invoices.length?'Weitere Rechnung':'Rechnung erstellen'}</button>`;
+  return `<div class="invoice-list">${invoices.map(invoice=>`<div class="invoice-entry"><strong>${esc(invoice.invoice_number)}</strong><small>${euro(invoice.gross_cents)} · Gedruckt/offen${invoice.emailed_at?` · versendet ${fmt(invoice.emailed_at)}`:''}</small><div class="row-actions"><button class="button small download-invoice" data-id="${invoice.id}" data-number="${esc(invoice.invoice_number)}">PDF herunterladen</button><button class="button small email-invoice" data-id="${invoice.id}" ${item.email?'':'disabled title="E-Mail-Adresse fehlt"'}>Per E-Mail</button></div></div>`).join('')}</div><button class="button small create-invoice" data-id="${item.id}" ${item.billing_address?'':'disabled title="Rechnungsanschrift fehlt"'}>${invoices.length?'Weitere Rechnung':'Rechnung erstellen'}</button>`;
+}
+async function downloadInvoice(id,number){
+  try{
+    const response=await api(`/api/invoices/${id}`);
+    if(!(response instanceof Response)||(response.headers.get('content-type')||'').split(';')[0]!=='application/pdf')throw new Error('Der Server hat keine gültige PDF-Datei zurückgegeben.');
+    const blob=await response.blob();
+    if(blob.size<100)throw new Error('Die PDF-Datei ist unvollständig.');
+    const url=URL.createObjectURL(blob),link=document.createElement('a');
+    link.href=url;link.download=`Rechnung-${number}.pdf`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }catch(error){toast(error.message,true)}
 }
 function invoiceDeliveryDialog(license){
   const zero=Number(license.amount_cents)===0;
@@ -348,7 +358,7 @@ function invoiceDeliveryDialog(license){
       if(delivery==='email')await api(`/api/invoices/${invoice.id}/email`,{method:'POST',body:{}});
       closeDialog();
       if(delivery==='download'){
-        const link=document.createElement('a');link.href=`/api/invoices/${invoice.id}`;link.download=`Rechnung-${invoice.invoice_number}.pdf`;document.body.appendChild(link);link.click();link.remove();
+        await downloadInvoice(invoice.id,invoice.invoice_number);
       }
       toast(delivery==='email'?`Rechnung ${invoice.invoice_number} wurde erstellt und versendet.`:`Rechnung ${invoice.invoice_number} wurde erstellt.`);
       route();
@@ -383,6 +393,7 @@ async function renderLicenses(){
     try{await api(`/api/license-requests/${button.dataset.id}`,{method:'PATCH',body:{status:'closed'}});toast('Anfrage wurde als erledigt markiert.');route()}catch(error){toast(error.message,true)}
   }));
   $$('.create-invoice').forEach(button=>button.addEventListener('click',()=>invoiceDeliveryDialog(licenses.find(item=>item.id===Number(button.dataset.id)))));
+  $$('.download-invoice').forEach(button=>button.addEventListener('click',()=>downloadInvoice(button.dataset.id,button.dataset.number)));
   $$('.email-invoice').forEach(button=>button.addEventListener('click',async()=>{try{await api(`/api/invoices/${button.dataset.id}/email`,{method:'POST',body:{}});toast('Die Rechnung wurde per E-Mail versendet.');route()}catch(error){toast(error.message,true)}}));
   $$('.license-history').forEach(button=>button.addEventListener('click',()=>licenseHistoryDialog(licenses.find(item=>item.id===Number(button.dataset.id)))));
 }
@@ -393,7 +404,7 @@ function licenseRequestsSection(requests){
 }
 function licenseTeacherChoices(teachers,selected=[]){
   const selectedIds=new Set(selected.map(item=>Number(item.id??item)));
-  return teachers.length?`<div class="license-teacher-list">${teachers.map(teacher=>`<label class="class-choice"><input type="checkbox" name="license_teacher" value="${teacher.id}" ${selectedIds.has(teacher.id)?'checked':''}><span><strong>${esc(teacher.first_name)}</strong><small>${esc(teacher.username)}${teacher.active?'':' · Konto gesperrt'}</small></span></label>`).join('')}</div>`:empty('Noch keine Lehrkraftzugänge','Legen Sie zunächst mindestens einen Lehrkraftzugang an.');
+  return teachers.length?`<div class="license-teacher-list">${teachers.map(teacher=>{const current=teacher.licenses?.find(item=>['active','draft','suspended'].includes(item.status));return `<label class="class-choice"><input type="checkbox" name="license_teacher" value="${teacher.id}" ${selectedIds.has(teacher.id)?'checked':''}><span><strong>${esc(teacher.first_name)}</strong><small>${esc(teacher.username)}${teacher.active?'':' · Konto gesperrt'}${current&&!selectedIds.has(teacher.id)?` · bisher ${esc(LICENSE_PLANS[current.plan]||current.plan)}`:''}</small></span></label>`}).join('')}</div>`:empty('Noch keine Lehrkraftzugänge','Legen Sie zunächst mindestens einen Lehrkraftzugang an.');
 }
 function licenseDialog(teachers,license=null,prefill=null){
   const editing=Boolean(license),initialPlan=license?.plan||prefill?.plan||'beta',initialCycle=license?.billing_cycle||(initialPlan==='beta'?'none':'annual'),dates=license||defaultLicenseDates(initialPlan,initialCycle);
@@ -407,7 +418,7 @@ function licenseDialog(teachers,license=null,prefill=null){
     <div class="form-grid"><label>Zahlungsstatus<select name="payment_status">${Object.entries(PAYMENT_STATUS).map(([key,label])=>`<option value="${key}" ${(license?.payment_status||(initialPlan==='beta'?'not_required':'open'))===key?'selected':''}>${esc(label)}</option>`).join('')}</select></label><label>Lizenzstatus<select name="status">${Object.entries(LICENSE_STATUS).map(([key,label])=>`<option value="${key}" ${(license?.status||'draft')===key?'selected':''}>${esc(label)}</option>`).join('')}</select></label></div>
     <label>Rechnungsanschrift<textarea name="billing_address" maxlength="1000" placeholder="Organisation oder Name&#10;Straße und Hausnummer&#10;PLZ Ort">${esc(license?.billing_address||'')}</textarea><small class="muted">Kann nachträglich ergänzt werden; vor der PDF-Rechnung ist sie verpflichtend.</small></label>
     <label>Bestellnummer / Leitweg-ID<input name="invoice_reference" value="${esc(license?.invoice_reference||'')}" maxlength="120"></label>
-    <fieldset class="team-assignment"><legend>Zugeordnete Lehrkraftzugänge</legend><p class="muted">Eine Zuordnung macht den Zugang lizenzpflichtig. Ohne aktive Lizenz ist anschließend keine Anmeldung mehr möglich.</p>${licenseTeacherChoices(teachers,license?.teachers||[])}</fieldset>
+    <fieldset class="team-assignment"><legend>Zugeordnete Lehrkraftzugänge</legend><p class="muted">Ausgewählte Zugänge werden dieser Lizenz zugeordnet. Eine bisherige aktuelle Lizenzzuordnung wird dabei automatisch ersetzt.</p>${licenseTeacherChoices(teachers,license?.teachers||[])}</fieldset>
     <label>Interne Notizen<textarea name="notes" maxlength="4000">${esc(license?.notes||prefill?.notes||'')}</textarea></label>
   </form>`,`<button class="button" value="cancel">Abbrechen</button><button class="button primary" id="save-license" value="none">${editing?'Speichern':'Lizenz anlegen'}</button>`);
   const planInput=$('[name=plan]',dlg),cycleInput=$('[name=billing_cycle]',dlg);
@@ -453,9 +464,15 @@ async function invoiceSettingsDialog(){
 async function renderTeachers(classes){
   breadcrumbs([{label:'Verwaltung',href:'#/admin'},{label:'Lehrkräfte'}]);
   const [teachers,licenses]=await Promise.all([api('/api/teachers'),api('/api/licenses')]);
-  $('#content').innerHTML=pageHeader('Lehrkraftzugänge','Konten und Lizenzfreigaben gemeinsam verwalten.','<button class="button primary" id="add-teacher">Lehrkraft anlegen</button>')+adminViewTabs('teachers')+`<div class="grid cards teacher-cards">${teachers.length?teachers.map(teacher=>{const license=teacher.licenses.find(item=>item.status==='active')||teacher.licenses[0],enabled=teacher.active&&teacher.license_valid;return `<article class="card"><div class="teacher-card-heading"><div><div class="eyebrow">Lehrkraftzugang</div><h3>${esc(teacher.first_name)}</h3><p class="muted">${esc(teacher.username)}</p></div><span class="status-pill ${enabled?'active':'inactive'}">${enabled?'Freigeschaltet':teacher.active?'Nicht freigeschaltet':'Konto gesperrt'}</span></div><div class="teacher-classes"><strong>Lizenz</strong><p>${license?`${esc(LICENSE_PLANS[license.plan]||license.plan)}${license.plan==='single'?` · ${esc(BILLING_CYCLES[license.billing_cycle]||license.billing_cycle)}`:''} · ${esc(LICENSE_STATUS[license.status]||license.status)} bis ${fmtDate(license.ends_on)}`:'Keine Lizenz zugeordnet'}${!teacher.license_valid?' · Anmeldung nicht möglich':''}</p></div><div class="teacher-classes"><strong>Verwaltete Klassen</strong><p>${teacher.class_count} ${teacher.class_count===1?'Klasse':'Klassen'}${teacher.support_active?' · Supportzugriff aktiv':''}</p></div><div class="teacher-card-footer"><small>Letzte Anmeldung: ${fmt(teacher.last_login_at)}</small><button class="button small edit-teacher" data-id="${teacher.id}">Bearbeiten</button></div></article>`}).join(''):empty('Noch keine Lehrkraftzugänge','Legen Sie den ersten Zugang an und wählen Sie dabei direkt eine Lizenz.')}</div>`;
+  $('#content').innerHTML=pageHeader('Lehrkraftzugänge','Konten und Lizenzfreigaben gemeinsam verwalten.','<button class="button primary" id="add-teacher">Lehrkraft anlegen</button>')+adminViewTabs('teachers')+`<div class="grid cards teacher-cards">${teachers.length?teachers.map(teacher=>{
+    const assignment=teacher.licenses.find(item=>['active','draft','suspended'].includes(item.status))||teacher.licenses[0];
+    const license=licenses.find(item=>item.id===assignment?.id);
+    const enabled=teacher.active&&teacher.license_valid;
+    return `<article class="card"><div class="teacher-card-heading"><div><div class="eyebrow">Lehrkraftzugang</div><h3>${esc(teacher.first_name)}</h3><p class="muted">${esc(teacher.username)}</p></div><span class="status-pill ${enabled?'active':'inactive'}">${enabled?'Freigeschaltet':teacher.active?'Nicht freigeschaltet':'Konto gesperrt'}</span></div><div class="teacher-classes"><strong>Lizenz</strong><p>${assignment?`${esc(LICENSE_PLANS[assignment.plan]||assignment.plan)}${assignment.plan==='single'?` · ${esc(BILLING_CYCLES[assignment.billing_cycle]||assignment.billing_cycle)}`:''} · ${esc(LICENSE_STATUS[assignment.status]||assignment.status)} bis ${fmtDate(assignment.ends_on)}`:'Keine Lizenz zugeordnet'}${!teacher.license_valid?' · Anmeldung nicht möglich':''}</p></div><div class="teacher-classes"><strong>Verwaltete Klassen</strong><p>${teacher.class_count} ${teacher.class_count===1?'Klasse':'Klassen'}${teacher.support_active?' · Supportzugriff aktiv':''}</p></div><div class="teacher-card-footer"><small>Letzte Anmeldung: ${fmt(teacher.last_login_at)}</small><div class="row-actions"><button class="button small edit-teacher" data-id="${teacher.id}">Konto & Zuordnung</button>${license?`<button class="button small edit-teacher-license" data-id="${license.id}">Lizenzdetails</button>`:''}</div></div></article>`;
+  }).join(''):empty('Noch keine Lehrkraftzugänge','Legen Sie den ersten Zugang an und wählen Sie dabei direkt eine Lizenz.')}</div>`;
   $('#add-teacher').addEventListener('click',()=>teacherDialog(licenses));
   $$('.edit-teacher').forEach(button=>button.addEventListener('click',()=>teacherDialog(licenses,teachers.find(teacher=>teacher.id===Number(button.dataset.id)))));
+  $$('.edit-teacher-license').forEach(button=>button.addEventListener('click',()=>licenseDialog(teachers,licenses.find(license=>license.id===Number(button.dataset.id)))));
 }
 function teacherClassChoices(classes,selected=[]){
   const selectedIds=new Set(selected.map(item=>Number(item.id??item)));
@@ -470,9 +487,9 @@ function teacherDialog(licenses,teacher=null){
   const current=teacher?.licenses.find(item=>['active','draft','suspended'].includes(item.status));
   const existingOptions=licenses.filter(item=>['active','draft','suspended'].includes(item.status)&&(item.used_seats<item.seat_limit||item.id===current?.id));
   const dlg=openDialog(editing?`Lehrkraft ${teacher.first_name} bearbeiten`:'Lehrkraft anlegen',`<form id="teacher-form" class="stack">
-    <div class="form-grid"><label>Name<input name="first_name" value="${esc(teacher?.first_name||'')}" maxlength="80" required></label><label>Benutzername<input name="username" value="${esc(teacher?.username||'lehrkraft_')}" maxlength="50" autocomplete="off" required><small class="muted">Muss mit „lehrkraft_“ beginnen.</small></label></div>
+    <div class="form-grid teacher-identity-grid"><label>Name<input name="first_name" value="${esc(teacher?.first_name||'')}" maxlength="80" required></label><label>Benutzername<input name="username" value="${esc(teacher?.username||'lehrkraft_')}" maxlength="50" autocomplete="off" required><small class="muted">Muss mit „lehrkraft_“ beginnen.</small></label></div>
     ${editing?`<label class="toggle-row"><input type="checkbox" name="active" ${teacher.active?'checked':''}> Konto technisch aktiviert</label>`:''}
-    <label>Lizenz und Freigabe<select name="license_selection">
+    <section class="license-assignment-panel"><strong>Lizenzzuordnung</strong><p class="muted">Wählen Sie die Lizenz für diesen Zugang. Beim Wechsel wird eine bisherige aktuelle Zuordnung automatisch ersetzt.</p><label>Zuordnung ändern<select name="license_selection">
       <option value="none" ${current?'':'selected'}>Noch nicht freischalten / keine aktive Lizenz</option>
       <optgroup label="Neue Standardlizenz">
         <option value="new:beta">Beta-Test · 4 Wochen · 0 €</option>
@@ -480,7 +497,7 @@ function teacherDialog(licenses,teacher=null){
         <option value="new:annual">Einzellizenz · jährlich · 79 €</option>
       </optgroup>
       ${existingOptions.length?`<optgroup label="Vorhandene Lizenz mit freiem Platz">${existingOptions.map(item=>`<option value="existing:${item.id}" ${item.id===current?.id?'selected':''}>${esc(item.organization||item.customer_name)} · ${esc(LICENSE_PLANS[item.plan]||item.plan)} · ${item.used_seats}/${item.seat_limit} Plätze · ${esc(LICENSE_STATUS[item.status]||item.status)}</option>`).join('')}</optgroup>`:''}
-    </select><small class="muted">Die Zuordnung kann später hier oder unter „Bestellungen & Lizenzen“ geändert werden.</small></label>
+    </select></label></section>
     <fieldset class="team-assignment new-license-details hidden"><legend>Daten der neuen Lizenz</legend><div class="stack"><div class="form-grid"><label>Ansprechperson<input name="license_customer_name" maxlength="120"></label><label>Schule / Organisation<input name="license_organization" maxlength="160"></label></div><label>E-Mail für die Rechnung<input name="license_email" type="email" maxlength="254"></label><label>Rechnungsanschrift<textarea name="license_billing_address" maxlength="1000" placeholder="Kann auch später in der Lizenz ergänzt werden"></textarea></label></div></fieldset>
     <div class="info-box">Eine Lehrkraft kann sich nur anmelden, wenn das Konto technisch aktiviert und eine aktive, noch gültige Lizenz zugeordnet ist.${editing&&teacher.last_login_at?' Das persönliche Kennwort kann nur die Lehrkraft selbst ändern.':''}</div>
   </form>`,editing?`<button class="button" value="cancel">Abbrechen</button>${teacher.last_login_at?'':'<button class="button" id="reset-teacher-password" value="none">Neues Initialkennwort</button>'}<button class="button primary" id="save-teacher" value="none">Speichern</button>`:'<button class="button" value="cancel">Abbrechen</button><button class="button primary" id="save-teacher" value="none">Lehrkraft anlegen</button>');

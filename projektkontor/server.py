@@ -1131,10 +1131,30 @@ class App:
             if self.db.one(sql + " LIMIT 1", tuple(params)):
                 raise HttpError(409, "Mindestens ein Lehrkraftzugang ist bereits einer zeitlich überschneidenden aktiven Lizenz zugeordnet.")
 
+    @staticmethod
+    def transfer_teacher_assignments(
+        connection: sqlite3.Connection, teacher_ids: list[int], target_license_id: int
+    ) -> None:
+        """Keep one current managed license per teacher and preserve expired history."""
+        if not teacher_ids:
+            return
+        placeholders = ",".join("?" for _ in teacher_ids)
+        connection.execute(
+            f"""DELETE FROM license_teachers
+                WHERE teacher_id IN ({placeholders}) AND license_id<>?
+                  AND license_id IN (
+                      SELECT id FROM licenses WHERE status IN ('draft','active','suspended')
+                  )""",
+            (*teacher_ids, target_license_id),
+        )
+        connection.execute(
+            f"DELETE FROM sessions WHERE user_id IN ({placeholders})",
+            tuple(teacher_ids),
+        )
+
     def create_license(self, environ, user):
         owner = self.require_owner(user)
         values = self.parse_license_payload(self.body(environ))
-        self.ensure_license_assignments_available(values)
         now = utcnow()
         with self.db.transaction() as connection:
             order = connection.execute(
@@ -1152,6 +1172,7 @@ class App:
                  values["status"], now, now),
             )
             license_id = int(license_row.lastrowid)
+            self.transfer_teacher_assignments(connection, values["teacher_ids"], license_id)
             for teacher_id in values["teacher_ids"]:
                 connection.execute(
                     "INSERT INTO license_teachers(license_id,teacher_id,assigned_at) VALUES(?,?,?)",
@@ -1176,7 +1197,6 @@ class App:
         if not current:
             raise HttpError(404, "Lizenz nicht gefunden.")
         values = self.parse_license_payload(self.body(environ), current)
-        self.ensure_license_assignments_available(values, license_id)
         now = utcnow()
         previous_teacher_ids = {teacher["id"] for teacher in current["teachers"]}
         affected_teacher_ids = previous_teacher_ids | set(values["teacher_ids"])
@@ -1200,6 +1220,7 @@ class App:
                 (values["seat_limit"], values["starts_on"], values["ends_on"], values["status"], now, license_id),
             )
             connection.execute("DELETE FROM license_teachers WHERE license_id=?", (license_id,))
+            self.transfer_teacher_assignments(connection, values["teacher_ids"], license_id)
             for teacher_id in values["teacher_ids"]:
                 connection.execute(
                     "INSERT INTO license_teachers(license_id,teacher_id,assigned_at) VALUES(?,?,?)",
@@ -1357,6 +1378,8 @@ class App:
                 "license_ends_on": license_record["ends_on"],
             }
             pdf_bytes = generate_invoice_pdf(snapshot)
+            if not pdf_bytes.startswith(b"%PDF-") or b"%%EOF" not in pdf_bytes[-1024:]:
+                raise HttpError(500, "Die PDF-Rechnung konnte nicht vollständig erzeugt werden.")
             destination = self.config.report_dir / stored_name
             temporary = destination.with_suffix(".tmp")
             temporary.write_bytes(pdf_bytes)
@@ -1401,11 +1424,14 @@ class App:
         path = self.config.report_dir / invoice["stored_name"]
         if not path.is_file():
             raise HttpError(404, "Die Rechnungsdatei ist nicht mehr vorhanden.")
+        pdf_bytes = path.read_bytes()
+        if not pdf_bytes.startswith(b"%PDF-") or b"%%EOF" not in pdf_bytes[-1024:]:
+            raise HttpError(500, "Die gespeicherte Rechnungsdatei ist beschädigt. Bitte erstellen Sie eine neue Rechnung.")
         self.db.execute(
             "UPDATE invoices SET status='open',downloaded_at=COALESCE(downloaded_at,?) WHERE id=?",
             (utcnow(), invoice_id),
         )
-        return path.read_bytes(), "application/pdf", f"Rechnung-{invoice['invoice_number']}.pdf", []
+        return pdf_bytes, "application/pdf", f"Rechnung-{invoice['invoice_number']}.pdf", []
 
     def email_invoice(self, environ, user, invoice_id):
         self.require_owner(user)
@@ -1419,13 +1445,17 @@ class App:
         if not path.is_file():
             raise HttpError(404, "Die Rechnungsdatei ist nicht mehr vorhanden.")
         config = self.config
-        sender = config.smtp_sender or config.smtp_username
-        if not config.smtp_host or not config.smtp_username or not config.smtp_password or not sender:
+        sender = config.smtp_username.strip().lower()
+        if not config.smtp_host or not sender or not config.smtp_password:
             raise HttpError(503, "Der Rechnungsversand ist noch nicht eingerichtet.")
+        if parseaddr(sender)[1] != sender or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", sender):
+            raise HttpError(503, "Der SMTP-Benutzername muss eine vollständige E-Mail-Adresse sein.")
         mail = EmailMessage()
         mail["From"] = formataddr(("PRIMEAdvisory - ProjektKontor", sender))
         mail["To"] = recipient
-        mail["Reply-To"] = config.smtp_sender or config.smtp_username
+        reply_to = (config.smtp_sender or sender).strip().lower()
+        if parseaddr(reply_to)[1] == reply_to and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", reply_to):
+            mail["Reply-To"] = reply_to
         mail["Subject"] = f"ProjektKontor Rechnung {invoice['invoice_number']}"
         mail.set_content(
             f"Guten Tag {invoice['customer_name']},\n\n"
@@ -1443,8 +1473,14 @@ class App:
                     smtp.starttls()
                 smtp.login(config.smtp_username, config.smtp_password)
                 smtp.send_message(mail)
+        except smtplib.SMTPAuthenticationError as exc:
+            raise HttpError(503, "Die SMTP-Anmeldung ist fehlgeschlagen. Prüfen Sie die GMX-Adresse und das Anwendungspasswort.") from exc
+        except smtplib.SMTPSenderRefused as exc:
+            raise HttpError(503, "GMX hat den Absender abgelehnt. Der Versand erfolgt nun immer über den hinterlegten SMTP-Benutzernamen.") from exc
+        except smtplib.SMTPRecipientsRefused as exc:
+            raise HttpError(503, "Die Empfängeradresse wurde vom Mailserver abgelehnt.") from exc
         except (OSError, smtplib.SMTPException) as exc:
-            raise HttpError(503, "Die Rechnung konnte gerade nicht per E-Mail versendet werden.") from exc
+            raise HttpError(503, "Der Mailserver ist derzeit nicht erreichbar oder hat den Versand abgelehnt.") from exc
         sent_at = utcnow()
         self.db.execute(
             "UPDATE invoices SET status='open',emailed_at=? WHERE id=?",

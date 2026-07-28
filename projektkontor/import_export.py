@@ -49,8 +49,8 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     )
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(
-        name="InvoiceBrand", parent=styles["Heading1"], fontSize=19, leading=22,
-        textColor=NAVY, spaceAfter=1 * mm,
+        name="InvoiceTitle", parent=styles["Heading1"], fontSize=21, leading=24,
+        textColor=NAVY, spaceAfter=2 * mm,
     ))
     styles.add(ParagraphStyle(
         name="InvoiceRight", parent=styles["BodyText"], alignment=TA_RIGHT,
@@ -71,26 +71,22 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     issuer_lines += f"<br/>{safe_paragraph(invoice['issuer_address'])}"
     if invoice.get("issuer_email"):
         issuer_lines += f"<br/>{safe_paragraph(invoice['issuer_email'])}"
-    if PRIMEADVISORY_LOGO_B64.is_file():
-        logo_bytes = base64.b64decode(PRIMEADVISORY_LOGO_B64.read_text(encoding="ascii"))
-        brand = Image(io.BytesIO(logo_bytes), width=68 * mm, height=16 * mm)
-    else:
-        brand = Paragraph("PRIME<span color='#6F8B74'>Advisory</span>", styles["InvoiceBrand"])
+    if not PRIMEADVISORY_LOGO_B64.is_file():
+        raise RuntimeError("Das originale PRIMEAdvisory-Logo fehlt.")
+    encoded_logo = "".join(PRIMEADVISORY_LOGO_B64.read_text(encoding="ascii").split())
+    logo_bytes = base64.b64decode(encoded_logo, validate=True)
+    brand = Image(io.BytesIO(logo_bytes), width=52 * mm, height=12.22 * mm)
     header = Table([
         [
             brand,
             Paragraph(issuer_lines, styles["InvoiceRight"]),
-        ],
-        [
-            Paragraph("Rechnung für ProjektKontor", styles["InvoiceSmall"]),
-            "",
-        ],
+        ]
     ], colWidths=[92 * mm, 78 * mm])
     header.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("LINEBELOW", (0, 1), (-1, 1), 1.2, SAGE),
-        ("BOTTOMPADDING", (0, 1), (-1, 1), 6 * mm),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.0, SAGE),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 5 * mm),
     ]))
 
     recipient = invoice.get("organization", "").strip()
@@ -171,15 +167,15 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     ]))
 
     if invoice["gross_cents"] == 0:
-        payment_parts = ["Nullrechnung: Für diese kostenfreie Leistung ist keine Zahlung erforderlich."]
+        payment_parts = ["Kostenfreie Leistung – keine Zahlung erforderlich."]
     else:
         payment_parts = [
             (
-                "Der Rechnungsbetrag ist sofort fällig."
+                "Fällig: sofort."
                 if invoice["due_on"] == invoice["issued_on"]
-                else f"Bitte zahlen Sie den Gesamtbetrag bis zum {datetime.fromisoformat(invoice['due_on']).strftime('%d.%m.%Y')}."
+                else f"Fällig bis {datetime.fromisoformat(invoice['due_on']).strftime('%d.%m.%Y')}."
             )
-            + f" Verwenden Sie dabei die Rechnungsnummer {safe_paragraph(invoice['invoice_number'])}.",
+            + f" Verwendungszweck: {safe_paragraph(invoice['invoice_number'])}.",
         ]
         if invoice.get("iban"):
             payment_parts.append(f"IBAN: {safe_paragraph(invoice['iban'])}")
@@ -196,25 +192,21 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     )
     story: list[Any] = [
         header,
-        Spacer(1, 9 * mm),
-        address_block,
-        Spacer(1, 12 * mm),
-        Paragraph("Rechnung", styles["Title"]),
-        Paragraph(
-            "Vielen Dank für Ihr Vertrauen in ProjektKontor. Wir berechnen die folgende Leistung:",
-            styles["BodyText"],
-        ),
-        Spacer(1, 7 * mm),
-        items,
-        Spacer(1, 6 * mm),
-        totals,
         Spacer(1, 8 * mm),
+        address_block,
+        Spacer(1, 9 * mm),
+        Paragraph("Rechnung", styles["InvoiceTitle"]),
+        Spacer(1, 4 * mm),
+        items,
+        Spacer(1, 5 * mm),
+        totals,
+        Spacer(1, 6 * mm),
     ]
     if invoice.get("tax_note"):
         story += [Paragraph(safe_paragraph(invoice["tax_note"]), styles["InvoiceSmall"]), Spacer(1, 5 * mm)]
     story += [
         Paragraph("<br/>".join(payment_parts), styles["BodyText"]),
-        Spacer(1, 15 * mm),
+        Spacer(1, 11 * mm),
         Paragraph(footer_text, styles["InvoiceSmall"]),
     ]
     doc.build(story)
