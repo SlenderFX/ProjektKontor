@@ -10,6 +10,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 from openpyxl import Workbook, load_workbook
+from PIL import Image as PILImage
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
@@ -75,7 +76,17 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
         raise RuntimeError("Das originale PRIMEAdvisory-Logo fehlt.")
     encoded_logo = "".join(PRIMEADVISORY_LOGO_B64.read_text(encoding="ascii").split())
     logo_bytes = base64.b64decode(encoded_logo, validate=True)
-    brand = Image(io.BytesIO(logo_bytes), width=52 * mm, height=12.22 * mm)
+    logo_source = PILImage.open(io.BytesIO(logo_bytes)).convert("RGBA")
+    logo_bounds = logo_source.getchannel("A").getbbox()
+    if not logo_bounds:
+        raise RuntimeError("Das originale PRIMEAdvisory-Logo enthält keine sichtbaren Bildpunkte.")
+    cropped_logo = logo_source.crop(logo_bounds)
+    cropped_logo_bytes = io.BytesIO()
+    cropped_logo.save(cropped_logo_bytes, format="PNG", optimize=True)
+    cropped_logo_bytes.seek(0)
+    logo_width = 52 * mm
+    logo_height = logo_width * cropped_logo.height / cropped_logo.width
+    brand = Image(cropped_logo_bytes, width=logo_width, height=logo_height)
     header = Table([
         [
             brand,
@@ -85,6 +96,7 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     header.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("LEFTPADDING", (0, 0), (0, 0), 0),
         ("LINEBELOW", (0, 0), (-1, 0), 1.0, SAGE),
         ("BOTTOMPADDING", (0, 0), (-1, 0), 5 * mm),
     ]))
