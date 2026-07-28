@@ -194,6 +194,7 @@ class App:
         route("GET", r"/api/invoice-settings")(self.get_invoice_settings)
         route("PATCH", r"/api/invoice-settings")(self.update_invoice_settings)
         route("POST", r"/api/licenses/(?P<license_id>\d+)/invoice")(self.create_invoice)
+        route("POST", r"/api/invoices/(?P<invoice_id>\d+)/email")(self.email_invoice)
         route("GET", r"/api/invoices/(?P<invoice_id>\d+)")(self.download_invoice)
         route("GET", r"/api/classes")(self.list_classes)
         route("POST", r"/api/classes")(self.create_class)
@@ -982,8 +983,19 @@ class App:
             (license_id,),
         )
         record["used_seats"] = len(record["teachers"])
-        record["invoice"] = self.db.one(
-            "SELECT id,invoice_number,issued_on,due_on,gross_cents,stored_name FROM invoices WHERE license_id=?",
+        record["invoices"] = self.db.all(
+            """SELECT id,invoice_number,issued_on,due_on,gross_cents,stored_name,status,
+                      emailed_at,downloaded_at,created_at
+               FROM invoices WHERE license_id=? ORDER BY issued_on DESC,id DESC""",
+            (license_id,),
+        )
+        record["invoice"] = record["invoices"][0] if record["invoices"] else None
+        record["history"] = self.db.all(
+            """SELECT h.id,h.event_type,h.from_plan,h.to_plan,h.from_billing_cycle,
+                      h.to_billing_cycle,h.from_amount_cents,h.to_amount_cents,
+                      h.from_status,h.to_status,h.changed_at,u.first_name changed_by_name
+               FROM license_history h LEFT JOIN users u ON u.id=h.changed_by
+               WHERE h.license_id=? ORDER BY h.changed_at DESC,h.id DESC""",
             (license_id,),
         )
         return record
@@ -1067,9 +1079,13 @@ class App:
                 raise HttpError(400, "Ein Beta-Testzugang muss kostenfrei sein.")
             payment_status = "not_required"
         elif plan == "single":
+            if amount_cents <= 0:
+                raise HttpError(400, "Eine Bezahl-Lizenz benötigt einen Preis größer als 0 Euro.")
             if billing_cycle not in {"monthly", "annual"}:
                 raise HttpError(400, "Für eine Einzellizenz ist ein Monats- oder Jahreszugang erforderlich.")
         else:
+            if amount_cents <= 0:
+                raise HttpError(400, "Eine Bezahl-Lizenz benötigt einen Preis größer als 0 Euro.")
             billing_cycle = "annual"
         today = datetime.now(timezone.utc).date().isoformat()
         if status == "active" and ends_on < today:
@@ -1116,7 +1132,7 @@ class App:
                 raise HttpError(409, "Mindestens ein Lehrkraftzugang ist bereits einer zeitlich überschneidenden aktiven Lizenz zugeordnet.")
 
     def create_license(self, environ, user):
-        self.require_owner(user)
+        owner = self.require_owner(user)
         values = self.parse_license_payload(self.body(environ))
         self.ensure_license_assignments_available(values)
         now = utcnow()
@@ -1142,10 +1158,20 @@ class App:
                     (license_id, teacher_id, now),
                 )
                 connection.execute("UPDATE users SET license_managed=1 WHERE id=?", (teacher_id,))
+            connection.execute(
+                """INSERT INTO license_history(
+                       license_id,changed_by,event_type,from_plan,to_plan,from_billing_cycle,
+                       to_billing_cycle,from_amount_cents,to_amount_cents,from_status,to_status,changed_at
+                   ) VALUES(?,?,'created',NULL,?,NULL,?,NULL,?,NULL,?,?)""",
+                (
+                    license_id, owner["id"], values["plan"], values["billing_cycle"],
+                    values["amount_cents"], values["status"], now,
+                ),
+            )
         return self.license_record(license_id)
 
     def update_license(self, environ, user, license_id):
-        self.require_owner(user)
+        owner = self.require_owner(user)
         current = self.license_record(license_id)
         if not current:
             raise HttpError(404, "Lizenz nicht gefunden.")
@@ -1186,6 +1212,18 @@ class App:
                     f"DELETE FROM sessions WHERE user_id IN ({placeholders})",
                     tuple(affected_teacher_ids),
                 )
+            event_type = "converted" if current["plan"] == "beta" and values["plan"] != "beta" else "updated"
+            connection.execute(
+                """INSERT INTO license_history(
+                       license_id,changed_by,event_type,from_plan,to_plan,from_billing_cycle,
+                       to_billing_cycle,from_amount_cents,to_amount_cents,from_status,to_status,changed_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    license_id, owner["id"], event_type, current["plan"], values["plan"],
+                    current["billing_cycle"], values["billing_cycle"], current["amount_cents"],
+                    values["amount_cents"], current["status"], values["status"], now,
+                ),
+            )
         return self.license_record(license_id)
 
     def get_invoice_settings(self, environ, user):
@@ -1221,8 +1259,8 @@ class App:
             raise HttpError(400, "Die umsatzsteuerliche Einstellung ist ungültig.")
         if not re.fullmatch(r"[A-Z0-9-]{1,12}", invoice_prefix):
             raise HttpError(400, "Das Rechnungspräfix darf nur Großbuchstaben, Ziffern und Bindestriche enthalten.")
-        if not 0 <= payment_terms_days <= 365:
-            raise HttpError(400, "Das Zahlungsziel muss zwischen 0 und 365 Tagen liegen.")
+        if payment_terms_days not in {0, 7, 14, 30}:
+            raise HttpError(400, "Bitte wählen Sie als Zahlungsziel Sofort, 7, 14 oder 30 Tage.")
         if iban and not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}", iban):
             raise HttpError(400, "Die IBAN ist formal ungültig.")
         if bic and not re.fullmatch(r"[A-Z0-9]{8}([A-Z0-9]{3})?", bic):
@@ -1241,6 +1279,8 @@ class App:
 
     @staticmethod
     def invoice_description(license_record: dict[str, Any]) -> str:
+        if license_record["plan"] == "beta":
+            return "ProjektKontor Beta-Testzugang - kostenfreie vierwöchige Testlizenz"
         if license_record["plan"] == "single":
             cycle = "Monatszugang" if license_record.get("billing_cycle") == "monthly" else "Jahreszugang"
             return f"ProjektKontor Einzellizenz - {cycle} für eine Lehrkraft"
@@ -1255,21 +1295,26 @@ class App:
         license_record = self.license_record(license_id)
         if not license_record:
             raise HttpError(404, "Lizenz nicht gefunden.")
-        if license_record.get("invoice"):
-            return license_record["invoice"]
-        if license_record["plan"] == "beta" or license_record["amount_cents"] <= 0:
-            raise HttpError(400, "Für einen kostenfreien Beta-Testzugang wird keine Rechnung erstellt.")
+        data = self.body(environ)
+        is_zero_invoice = int(license_record["amount_cents"]) == 0
+        if is_zero_invoice and data.get("confirm_zero_invoice") is not True:
+            raise HttpError(400, "Bestätigen Sie ausdrücklich, dass wirklich eine Nullrechnung erstellt werden soll.")
         if not license_record["billing_address"].strip():
             raise HttpError(400, "Ergänzen Sie vor der Rechnungserstellung die vollständige Rechnungsanschrift.")
         settings = self.db.one("SELECT * FROM invoice_settings WHERE id=1")
         if not settings or not settings["business_name"] or not settings["address"] or not settings["tax_identifier"]:
             raise HttpError(400, "Vervollständigen Sie zunächst die Angaben zum Rechnungssteller.")
-        if not settings["iban"]:
+        if not is_zero_invoice and not settings["iban"]:
             raise HttpError(400, "Ergänzen Sie vor der Rechnungserstellung die Bankverbindung des Rechnungsstellers.")
         issued = datetime.now(timezone.utc).date()
         due = issued + timedelta(days=settings["payment_terms_days"])
         gross_cents = int(license_record["amount_cents"])
-        if settings["tax_mode"] == "standard" and settings["vat_rate_basis_points"] > 0:
+        if is_zero_invoice:
+            net_cents = 0
+            vat_cents = 0
+            vat_rate = 0
+            tax_note = "Kostenfreie Leistung. Es wird kein Entgelt berechnet."
+        elif settings["tax_mode"] == "standard" and settings["vat_rate_basis_points"] > 0:
             net_cents = round(gross_cents * 10000 / (10000 + settings["vat_rate_basis_points"]))
             vat_cents = gross_cents - net_cents
             vat_rate = settings["vat_rate_basis_points"]
@@ -1282,12 +1327,6 @@ class App:
         now = utcnow()
         stored_name = ""
         with self.db.transaction() as connection:
-            existing = connection.execute(
-                "SELECT id,invoice_number,issued_on,due_on,gross_cents,stored_name FROM invoices WHERE license_id=?",
-                (license_id,),
-            ).fetchone()
-            if existing:
-                return dict(existing)
             locked_settings = dict(connection.execute("SELECT * FROM invoice_settings WHERE id=1").fetchone())
             invoice_number = f"{locked_settings['invoice_prefix']}-{issued.year}-{locked_settings['next_invoice_number']:04d}"
             stored_name = f"rechnung-{invoice_number.lower()}.pdf"
@@ -1328,8 +1367,9 @@ class App:
                        organization,email,billing_address,invoice_reference,description,
                        net_cents,vat_rate_basis_points,vat_cents,gross_cents,issuer_name,
                        issuer_proprietor,issuer_address,issuer_email,issuer_tax_identifier,
-                       tax_note,iban,bic,bank_name,stored_name,created_by,created_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       tax_note,iban,bic,bank_name,stored_name,status,emailed_at,downloaded_at,
+                       created_by,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?)""",
                 (
                     license_id, invoice_number, issued.isoformat(), license_record["starts_on"],
                     due.isoformat(), license_record["customer_name"], license_record["organization"],
@@ -1339,7 +1379,7 @@ class App:
                     snapshot["issuer_proprietor"], snapshot["issuer_address"],
                     snapshot["issuer_email"], snapshot["issuer_tax_identifier"], tax_note,
                     snapshot["iban"], snapshot["bic"], snapshot["bank_name"], stored_name,
-                    owner["id"], now,
+                    "open", owner["id"], now,
                 ),
             )
             connection.execute(
@@ -1348,7 +1388,8 @@ class App:
             )
             invoice_id = int(cursor.lastrowid)
         return self.db.one(
-            "SELECT id,invoice_number,issued_on,due_on,gross_cents,stored_name FROM invoices WHERE id=?",
+            """SELECT id,invoice_number,issued_on,due_on,gross_cents,stored_name,status,
+                      emailed_at,downloaded_at,created_at FROM invoices WHERE id=?""",
             (invoice_id,),
         )
 
@@ -1360,7 +1401,59 @@ class App:
         path = self.config.report_dir / invoice["stored_name"]
         if not path.is_file():
             raise HttpError(404, "Die Rechnungsdatei ist nicht mehr vorhanden.")
+        self.db.execute(
+            "UPDATE invoices SET status='open',downloaded_at=COALESCE(downloaded_at,?) WHERE id=?",
+            (utcnow(), invoice_id),
+        )
         return path.read_bytes(), "application/pdf", f"Rechnung-{invoice['invoice_number']}.pdf", []
+
+    def email_invoice(self, environ, user, invoice_id):
+        self.require_owner(user)
+        invoice = self.db.one("SELECT * FROM invoices WHERE id=?", (invoice_id,))
+        if not invoice:
+            raise HttpError(404, "Rechnung nicht gefunden.")
+        recipient = str(invoice.get("email", "")).strip().lower()
+        if not recipient or parseaddr(recipient)[1] != recipient or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", recipient):
+            raise HttpError(400, "Für diese Rechnung ist keine gültige Empfängeradresse hinterlegt.")
+        path = self.config.report_dir / invoice["stored_name"]
+        if not path.is_file():
+            raise HttpError(404, "Die Rechnungsdatei ist nicht mehr vorhanden.")
+        config = self.config
+        sender = config.smtp_sender or config.smtp_username
+        if not config.smtp_host or not config.smtp_username or not config.smtp_password or not sender:
+            raise HttpError(503, "Der Rechnungsversand ist noch nicht eingerichtet.")
+        mail = EmailMessage()
+        mail["From"] = formataddr(("PRIMEAdvisory - ProjektKontor", sender))
+        mail["To"] = recipient
+        mail["Reply-To"] = config.smtp_sender or config.smtp_username
+        mail["Subject"] = f"ProjektKontor Rechnung {invoice['invoice_number']}"
+        mail.set_content(
+            f"Guten Tag {invoice['customer_name']},\n\n"
+            f"anbei erhalten Sie die Rechnung {invoice['invoice_number']} für ProjektKontor.\n\n"
+            "Freundliche Grüße\nPRIMEAdvisory"
+        )
+        mail.add_attachment(
+            path.read_bytes(), maintype="application", subtype="pdf",
+            filename=f"Rechnung-{invoice['invoice_number']}.pdf",
+        )
+        smtp_class = smtplib.SMTP_SSL if config.smtp_use_ssl else smtplib.SMTP
+        try:
+            with smtp_class(config.smtp_host, config.smtp_port, timeout=15) as smtp:
+                if not config.smtp_use_ssl:
+                    smtp.starttls()
+                smtp.login(config.smtp_username, config.smtp_password)
+                smtp.send_message(mail)
+        except (OSError, smtplib.SMTPException) as exc:
+            raise HttpError(503, "Die Rechnung konnte gerade nicht per E-Mail versendet werden.") from exc
+        sent_at = utcnow()
+        self.db.execute(
+            "UPDATE invoices SET status='open',emailed_at=? WHERE id=?",
+            (sent_at, invoice_id),
+        )
+        return {
+            "ok": True, "message": "Die Rechnung wurde per E-Mail versendet.",
+            "invoice_id": invoice_id, "emailed_at": sent_at,
+        }
 
     def list_teachers(self, environ, user):
         self.require_owner(user)

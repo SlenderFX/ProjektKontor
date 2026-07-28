@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import base64
 import re
 import unicodedata
 from datetime import datetime
@@ -22,6 +23,7 @@ from .db import Database
 NAVY = colors.HexColor("#0F2E5D")
 SAGE = colors.HexColor("#6F8B74")
 LIGHT = colors.HexColor("#E6E9ED")
+PRIMEADVISORY_LOGO_B64 = Path(__file__).resolve().parent / "static" / "primeadvisory-logo.png.b64"
 
 
 def safe_paragraph(value: Any) -> str:
@@ -69,9 +71,14 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     issuer_lines += f"<br/>{safe_paragraph(invoice['issuer_address'])}"
     if invoice.get("issuer_email"):
         issuer_lines += f"<br/>{safe_paragraph(invoice['issuer_email'])}"
+    if PRIMEADVISORY_LOGO_B64.is_file():
+        logo_bytes = base64.b64decode(PRIMEADVISORY_LOGO_B64.read_text(encoding="ascii"))
+        brand = Image(io.BytesIO(logo_bytes), width=68 * mm, height=16 * mm)
+    else:
+        brand = Paragraph("PRIME<span color='#6F8B74'>Advisory</span>", styles["InvoiceBrand"])
     header = Table([
         [
-            Paragraph("PRIME<span color='#6F8B74'>Advisory</span>", styles["InvoiceBrand"]),
+            brand,
             Paragraph(issuer_lines, styles["InvoiceRight"]),
         ],
         [
@@ -95,7 +102,11 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
         ["Rechnungsnummer", invoice["invoice_number"]],
         ["Rechnungsdatum", datetime.fromisoformat(invoice["issued_on"]).strftime("%d.%m.%Y")],
         ["Leistungsdatum", datetime.fromisoformat(invoice["service_on"]).strftime("%d.%m.%Y")],
-        ["Zahlbar bis", datetime.fromisoformat(invoice["due_on"]).strftime("%d.%m.%Y")],
+        [
+            "Zahlungsziel",
+            "Sofort" if invoice["due_on"] == invoice["issued_on"]
+            else datetime.fromisoformat(invoice["due_on"]).strftime("%d.%m.%Y"),
+        ],
     ]
     if invoice.get("invoice_reference"):
         details.append(["Referenz", invoice["invoice_reference"]])
@@ -159,16 +170,23 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
         ("TOPPADDING", (0, -1), (-1, -1), 7),
     ]))
 
-    payment_parts = [
-        f"Bitte zahlen Sie den Gesamtbetrag bis zum {datetime.fromisoformat(invoice['due_on']).strftime('%d.%m.%Y')} "
-        f"unter Angabe der Rechnungsnummer {safe_paragraph(invoice['invoice_number'])}.",
-    ]
-    if invoice.get("iban"):
-        payment_parts.append(f"IBAN: {safe_paragraph(invoice['iban'])}")
-    if invoice.get("bic"):
-        payment_parts.append(f"BIC: {safe_paragraph(invoice['bic'])}")
-    if invoice.get("bank_name"):
-        payment_parts.append(f"Bank: {safe_paragraph(invoice['bank_name'])}")
+    if invoice["gross_cents"] == 0:
+        payment_parts = ["Nullrechnung: Für diese kostenfreie Leistung ist keine Zahlung erforderlich."]
+    else:
+        payment_parts = [
+            (
+                "Der Rechnungsbetrag ist sofort fällig."
+                if invoice["due_on"] == invoice["issued_on"]
+                else f"Bitte zahlen Sie den Gesamtbetrag bis zum {datetime.fromisoformat(invoice['due_on']).strftime('%d.%m.%Y')}."
+            )
+            + f" Verwenden Sie dabei die Rechnungsnummer {safe_paragraph(invoice['invoice_number'])}.",
+        ]
+        if invoice.get("iban"):
+            payment_parts.append(f"IBAN: {safe_paragraph(invoice['iban'])}")
+        if invoice.get("bic"):
+            payment_parts.append(f"BIC: {safe_paragraph(invoice['bic'])}")
+        if invoice.get("bank_name"):
+            payment_parts.append(f"Bank: {safe_paragraph(invoice['bank_name'])}")
 
     footer_text = (
         f"{safe_paragraph(invoice['issuer_name'])}"

@@ -335,6 +335,33 @@ function defaultLicenseDates(plan='single',billingCycle='annual'){
   else{end.setFullYear(end.getFullYear()+1);end.setDate(end.getDate()-1)}
   return {starts_on:start.toISOString().slice(0,10),ends_on:end.toISOString().slice(0,10)};
 }
+function licenseInvoices(item){
+  const invoices=item.invoices||[];
+  return `<div class="invoice-list">${invoices.map(invoice=>`<div class="invoice-entry"><strong>${esc(invoice.invoice_number)}</strong><small>${euro(invoice.gross_cents)} · Gedruckt/offen${invoice.emailed_at?` · versendet ${fmt(invoice.emailed_at)}`:''}</small><div class="row-actions"><a class="button small" href="/api/invoices/${invoice.id}" download>PDF</a><button class="button small email-invoice" data-id="${invoice.id}" ${item.email?'':'disabled title="E-Mail-Adresse fehlt"'}>Per E-Mail</button></div></div>`).join('')}</div><button class="button small create-invoice" data-id="${item.id}" ${item.billing_address?'':'disabled title="Rechnungsanschrift fehlt"'}>${invoices.length?'Weitere Rechnung':'Rechnung erstellen'}</button>`;
+}
+function invoiceDeliveryDialog(license){
+  const zero=Number(license.amount_cents)===0;
+  const dlg=openDialog(zero?'Nullrechnung erstellen':'Rechnung erstellen',`<div class="stack">${zero?'<div class="warning-box"><strong>Nullrechnung bestätigen</strong><br>Soll wirklich eine Rechnung über 0,00 € erstellt werden?</div>':'<div class="info-box"><strong>Rechnung verbindlich erstellen</strong><br>Die Rechnung erhält eine fortlaufende Nummer und wird dauerhaft an der Lizenz hinterlegt.</div>'}<p><strong>${esc(license.organization||license.customer_name)}</strong><br>${esc(LICENSE_PLANS[license.plan]||license.plan)} · ${euro(license.amount_cents)}</p><p class="muted">Wählen Sie, ob die PDF direkt heruntergeladen oder an ${license.email?`<strong>${esc(license.email)}</strong>`:'die noch fehlende E-Mail-Adresse'} gesendet werden soll.</p></div>`,`<button class="button" value="cancel">Abbrechen</button><button class="button" id="create-download-invoice" value="none">Erstellen & herunterladen</button><button class="button primary" id="create-email-invoice" value="none" ${license.email?'':'disabled title="E-Mail-Adresse fehlt"'}>Erstellen & per E-Mail senden</button>`);
+  const create=async delivery=>{
+    try{
+      const invoice=await api(`/api/licenses/${license.id}/invoice`,{method:'POST',body:{confirm_zero_invoice:zero}});
+      if(delivery==='email')await api(`/api/invoices/${invoice.id}/email`,{method:'POST',body:{}});
+      closeDialog();
+      if(delivery==='download'){
+        const link=document.createElement('a');link.href=`/api/invoices/${invoice.id}`;link.download=`Rechnung-${invoice.invoice_number}.pdf`;document.body.appendChild(link);link.click();link.remove();
+      }
+      toast(delivery==='email'?`Rechnung ${invoice.invoice_number} wurde erstellt und versendet.`:`Rechnung ${invoice.invoice_number} wurde erstellt.`);
+      route();
+    }catch(error){toast(error.message,true)}
+  };
+  $('#create-download-invoice',dlg).addEventListener('click',event=>{event.preventDefault();create('download')});
+  $('#create-email-invoice',dlg)?.addEventListener('click',event=>{event.preventDefault();create('email')});
+}
+function licenseHistoryDialog(license){
+  const eventLabels={created:'Angelegt',updated:'Bearbeitet',converted:'In Bezahllizenz umgewandelt'};
+  const history=license.history||[];
+  openDialog('Lizenzverlauf',history.length?`<div class="license-history">${history.map(item=>`<article><strong>${esc(eventLabels[item.event_type]||item.event_type)}</strong><small>${fmt(item.changed_at)} · ${esc(item.changed_by_name||'System')}</small><p>${item.from_plan?`${esc(LICENSE_PLANS[item.from_plan]||item.from_plan)} (${euro(item.from_amount_cents)}) → `:''}${esc(LICENSE_PLANS[item.to_plan]||item.to_plan)} (${euro(item.to_amount_cents)})</p></article>`).join('')}</div>`:empty('Noch kein Verlauf','Änderungen werden künftig mit Zeitstempel protokolliert.'),'<button class="button" value="cancel">Schließen</button>');
+}
 async function renderLicenses(){
   breadcrumbs([{label:'Verwaltung',href:'#/admin/teachers'},{label:'Bestellungen & Lizenzen'}]);
   const [licenses,teachers,requests]=await Promise.all([api('/api/licenses'),api('/api/teachers'),api('/api/license-requests')]);
@@ -344,7 +371,7 @@ async function renderLicenses(){
   $('#content').innerHTML=pageHeader('Bestellungen & Lizenzen','Lehrkraftzugänge, Laufzeiten, Rechnungsdaten und PDF-Rechnungen in einem Ablauf verwalten.','<button class="button" id="invoice-settings">Rechnungssteller</button><button class="button primary" id="add-license">Lizenz anlegen</button>')+adminViewTabs('licenses')+
     `<div class="license-metrics"><article class="card"><span>Neue Anfragen</span><strong>${openRequests.length}</strong></article><article class="card"><span>Aktive Lizenzen</span><strong>${active.length}</strong></article><article class="card"><span>Belegte Zugänge</span><strong>${used} / ${seats}</strong></article><article class="card"><span>Offene Zahlungen</span><strong>${open.length}</strong></article></div>`+
     licenseRequestsSection(requests)+
-    (licenses.length?`<div class="table-wrap"><table class="license-table"><thead><tr><th>Kunde / Schule</th><th>Modell</th><th>Laufzeit</th><th>Zugänge</th><th>Zahlung</th><th>Status</th><th>Rechnung</th><th>Aktionen</th></tr></thead><tbody>${licenses.map(item=>`<tr><td><strong>${esc(item.organization||item.customer_name)}</strong><small>${item.organization?esc(item.customer_name):''}${item.email?`${item.organization?' · ':''}${esc(item.email)}`:''}</small></td><td>${esc(LICENSE_PLANS[item.plan]||item.plan)}<small>${item.plan==='single'?`${esc(BILLING_CYCLES[item.billing_cycle]||item.billing_cycle)} · `:''}${euro(item.amount_cents)}</small></td><td>${fmtDate(item.starts_on)}–${fmtDate(item.ends_on)}</td><td><strong>${item.used_seats} / ${item.seat_limit}</strong><small>${item.teachers.map(teacher=>esc(teacher.first_name)).join(', ')||'Noch nicht zugeordnet'}</small></td><td><span class="status-pill payment-${item.payment_status}">${esc(PAYMENT_STATUS[item.payment_status]||item.payment_status)}</span></td><td><span class="status-pill license-${item.status}">${esc(LICENSE_STATUS[item.status]||item.status)}</span></td><td>${item.invoice?`<a class="button small" href="/api/invoices/${item.invoice.id}">${esc(item.invoice.invoice_number)} · PDF</a>`:item.plan==='beta'?'<span class="muted">Kostenfrei</span>':`<button class="button small create-invoice" data-id="${item.id}" ${item.billing_address?'':'disabled title="Rechnungsanschrift fehlt"'}>PDF erstellen</button>`}</td><td><button class="button small edit-license" data-id="${item.id}">Bearbeiten</button></td></tr>`).join('')}</tbody></table></div>`:empty('Noch keine Lizenz angelegt','Legen Sie eine Lizenz direkt hier oder bei einem Lehrkraftzugang an.'));
+    (licenses.length?`<div class="table-wrap"><table class="license-table"><thead><tr><th>Kunde / Schule</th><th>Modell</th><th>Laufzeit</th><th>Zugänge</th><th>Zahlung</th><th>Status</th><th>Rechnung</th><th>Aktionen</th></tr></thead><tbody>${licenses.map(item=>`<tr><td><strong>${esc(item.organization||item.customer_name)}</strong><small>${item.organization?esc(item.customer_name):''}${item.email?`${item.organization?' · ':''}${esc(item.email)}`:''}</small></td><td>${esc(LICENSE_PLANS[item.plan]||item.plan)}<small>${item.plan==='single'?`${esc(BILLING_CYCLES[item.billing_cycle]||item.billing_cycle)} · `:''}${euro(item.amount_cents)}</small></td><td>${fmtDate(item.starts_on)}–${fmtDate(item.ends_on)}</td><td><strong>${item.used_seats} / ${item.seat_limit}</strong><small>${item.teachers.map(teacher=>esc(teacher.first_name)).join(', ')||'Noch nicht zugeordnet'}</small></td><td><span class="status-pill payment-${item.payment_status}">${esc(PAYMENT_STATUS[item.payment_status]||item.payment_status)}</span></td><td><span class="status-pill license-${item.status}">${esc(LICENSE_STATUS[item.status]||item.status)}</span></td><td>${licenseInvoices(item)}</td><td><div class="row-actions"><button class="button small edit-license" data-id="${item.id}">Bearbeiten</button><button class="button small license-history" data-id="${item.id}">Verlauf</button></div></td></tr>`).join('')}</tbody></table></div>`:empty('Noch keine Lizenz angelegt','Legen Sie eine Lizenz direkt hier oder bei einem Lehrkraftzugang an.'));
   $('#add-license').addEventListener('click',()=>licenseDialog(teachers));
   $('#invoice-settings').addEventListener('click',invoiceSettingsDialog);
   $$('.edit-license').forEach(button=>button.addEventListener('click',()=>licenseDialog(teachers,licenses.find(item=>item.id===Number(button.dataset.id)))));
@@ -355,7 +382,9 @@ async function renderLicenses(){
   $$('.close-license-request').forEach(button=>button.addEventListener('click',async()=>{
     try{await api(`/api/license-requests/${button.dataset.id}`,{method:'PATCH',body:{status:'closed'}});toast('Anfrage wurde als erledigt markiert.');route()}catch(error){toast(error.message,true)}
   }));
-  $$('.create-invoice').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('Jetzt eine unveränderliche PDF-Rechnung mit fortlaufender Rechnungsnummer erstellen?'))return;try{const invoice=await api(`/api/licenses/${button.dataset.id}/invoice`,{method:'POST',body:{}});toast(`Rechnung ${invoice.invoice_number} wurde erstellt.`);route()}catch(error){toast(error.message,true)}}));
+  $$('.create-invoice').forEach(button=>button.addEventListener('click',()=>invoiceDeliveryDialog(licenses.find(item=>item.id===Number(button.dataset.id)))));
+  $$('.email-invoice').forEach(button=>button.addEventListener('click',async()=>{try{await api(`/api/invoices/${button.dataset.id}/email`,{method:'POST',body:{}});toast('Die Rechnung wurde per E-Mail versendet.');route()}catch(error){toast(error.message,true)}}));
+  $$('.license-history').forEach(button=>button.addEventListener('click',()=>licenseHistoryDialog(licenses.find(item=>item.id===Number(button.dataset.id)))));
 }
 function licenseRequestsSection(requests){
   const labels={new:'Neu',in_progress:'In Bearbeitung',converted:'Übernommen',closed:'Erledigt'};
@@ -382,20 +411,20 @@ function licenseDialog(teachers,license=null,prefill=null){
     <label>Interne Notizen<textarea name="notes" maxlength="4000">${esc(license?.notes||prefill?.notes||'')}</textarea></label>
   </form>`,`<button class="button" value="cancel">Abbrechen</button><button class="button primary" id="save-license" value="none">${editing?'Speichern':'Lizenz anlegen'}</button>`);
   const planInput=$('[name=plan]',dlg),cycleInput=$('[name=billing_cycle]',dlg);
-  const updateDefaults=()=>{
+  const updateDefaults=(force=false)=>{
     const plan=planInput.value;
     cycleInput.disabled=plan!=='single';
     if(plan!=='single')cycleInput.value=defaults[plan].cycle;
     else if(!['monthly','annual'].includes(cycleInput.value))cycleInput.value='annual';
     const cycle=cycleInput.value;
-    if(!editing){
+    if(!editing||force){
       $('[name=amount_euros]',dlg).value=plan==='single'&&cycle==='monthly'?'8.90':defaults[plan].price;
       $('[name=seat_limit]',dlg).value=defaults[plan].seats;
       const nextDates=defaultLicenseDates(plan,cycle);$('[name=starts_on]',dlg).value=nextDates.starts_on;$('[name=ends_on]',dlg).value=nextDates.ends_on;
       $('[name=payment_status]',dlg).value=plan==='beta'?'not_required':'open';
     }
   };
-  planInput.addEventListener('change',updateDefaults);cycleInput.addEventListener('change',()=>{if(!editing){const nextDates=defaultLicenseDates(planInput.value,cycleInput.value);$('[name=amount_euros]',dlg).value=cycleInput.value==='monthly'?'8.90':'79.00';$('[name=starts_on]',dlg).value=nextDates.starts_on;$('[name=ends_on]',dlg).value=nextDates.ends_on}});
+  planInput.addEventListener('change',()=>updateDefaults(true));cycleInput.addEventListener('change',()=>{if(!editing||planInput.value==='single'){const nextDates=defaultLicenseDates(planInput.value,cycleInput.value);$('[name=amount_euros]',dlg).value=cycleInput.value==='monthly'?'8.90':'79.00';$('[name=starts_on]',dlg).value=nextDates.starts_on;$('[name=ends_on]',dlg).value=nextDates.ends_on;$('[name=payment_status]',dlg).value='open'}});
   updateDefaults();
   $('#save-license',dlg).addEventListener('click',async event=>{event.preventDefault();const form=$('#license-form',dlg),amount=Number(field(form,'amount_euros'));if(!Number.isFinite(amount))return toast('Bitte geben Sie einen gültigen Preis ein.',true);const body={plan:field(form,'plan'),billing_cycle:cycleInput.value,customer_name:field(form,'customer_name'),organization:field(form,'organization'),email:field(form,'email'),amount_cents:Math.round(amount*100),seat_limit:Number(field(form,'seat_limit')),starts_on:field(form,'starts_on'),ends_on:field(form,'ends_on'),payment_status:field(form,'payment_status'),status:field(form,'status'),billing_address:field(form,'billing_address'),invoice_reference:field(form,'invoice_reference'),notes:field(form,'notes'),teacher_ids:$$('input[name=license_teacher]:checked',form).map(input=>Number(input.value))};try{await api(editing?`/api/licenses/${license.id}`:'/api/licenses',{method:editing?'PATCH':'POST',body});if(prefill?.request_id)await api(`/api/license-requests/${prefill.request_id}`,{method:'PATCH',body:{status:'converted'}});closeDialog();route();toast(editing?'Lizenz wurde aktualisiert.':'Lizenz wurde angelegt.')}catch(error){toast(error.message,true)}});
 }
@@ -409,7 +438,12 @@ async function invoiceSettingsDialog(){
       <label>Anschrift<textarea name="address" maxlength="1000" required>${esc(settings.address)}</textarea></label>
       <div class="form-grid"><label>E-Mail<input name="email" type="email" value="${esc(settings.email)}" maxlength="254"></label><label>Steuernummer / USt-IdNr.<input name="tax_identifier" value="${esc(settings.tax_identifier)}" maxlength="40" required></label></div>
       <div class="form-grid"><label>Besteuerung<select name="tax_mode"><option value="small_business" ${settings.tax_mode==='small_business'?'selected':''}>Kleinunternehmer gemäß § 19 UStG</option><option value="standard" ${settings.tax_mode==='standard'?'selected':''}>Regelbesteuerung</option></select></label><label>Umsatzsteuersatz in %<input name="vat_rate" type="number" min="0" max="100" step="0.01" value="${Number(settings.vat_rate_basis_points)/100}"></label></div>
-      <div class="form-grid"><label>Rechnungspräfix<input name="invoice_prefix" value="${esc(settings.invoice_prefix)}" maxlength="12" required></label><label>Zahlungsziel in Tagen<input name="payment_terms_days" type="number" min="0" max="365" value="${settings.payment_terms_days}" required></label></div>
+      <div class="form-grid"><label>Rechnungspräfix<input name="invoice_prefix" value="${esc(settings.invoice_prefix)}" maxlength="12" required></label><label>Zahlungsziel<select name="payment_terms_days" required>
+        <option value="0" ${Number(settings.payment_terms_days)===0?'selected':''}>Sofort</option>
+        <option value="7" ${Number(settings.payment_terms_days)===7?'selected':''}>7 Tage</option>
+        <option value="14" ${Number(settings.payment_terms_days)===14?'selected':''}>14 Tage</option>
+        <option value="30" ${Number(settings.payment_terms_days)===30?'selected':''}>30 Tage</option>
+      </select></label></div>
       <div class="form-grid"><label>IBAN<input name="iban" value="${esc(settings.iban)}" maxlength="34"></label><label>BIC<input name="bic" value="${esc(settings.bic)}" maxlength="11"></label></div>
       <label>Bank<input name="bank_name" value="${esc(settings.bank_name)}" maxlength="160"></label>
     </form>`,`<button class="button" value="cancel">Abbrechen</button><button class="button primary" id="save-invoice-settings" value="none">Speichern</button>`);

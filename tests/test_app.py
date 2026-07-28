@@ -721,6 +721,68 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(self.app.teacher_license_valid(unassigned["id"]))
 
+    def test_beta_invoice_conversion_history_and_payment_terms(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        status, settings, _ = admin.request("GET", "/api/invoice-settings")
+        self.assertEqual(status, 200)
+        self.assertEqual(settings["payment_terms_days"], 0)
+        status, invalid, _ = admin.request("PATCH", "/api/invoice-settings", {
+            **settings, "payment_terms_days": 21,
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("Sofort, 7, 14 oder 30 Tage", invalid["error"])
+
+        status, beta, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Frau Test", "organization": "Beta-BK",
+            "email": "beta@example.org", "billing_address": "Testweg 1\n45127 Essen",
+            "plan": "beta", "amount_cents": 0, "seat_limit": 1,
+            "payment_status": "not_required", "status": "active",
+            "starts_on": "2026-07-01", "ends_on": "2026-07-28", "teacher_ids": [],
+        })
+        self.assertEqual(status, 200)
+        status, warning, _ = admin.request("POST", f"/api/licenses/{beta['id']}/invoice", {})
+        self.assertEqual(status, 400)
+        self.assertIn("Nullrechnung", warning["error"])
+        status, zero_invoice, _ = admin.request("POST", f"/api/licenses/{beta['id']}/invoice", {
+            "confirm_zero_invoice": True,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(zero_invoice["gross_cents"], 0)
+        self.assertEqual(zero_invoice["issued_on"], zero_invoice["due_on"])
+
+        status, paid, _ = admin.request("PATCH", f"/api/licenses/{beta['id']}", {
+            "plan": "single", "billing_cycle": "annual", "amount_cents": 7900,
+            "payment_status": "open", "status": "active",
+            "starts_on": "2026-07-29", "ends_on": "2027-07-28",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(paid["plan"], "single")
+        self.assertEqual(paid["amount_cents"], 7900)
+        self.assertEqual(paid["history"][0]["event_type"], "converted")
+        self.assertEqual(paid["history"][0]["from_plan"], "beta")
+        self.assertEqual(paid["history"][0]["to_plan"], "single")
+        self.assertTrue(paid["history"][0]["changed_at"])
+
+        status, settings, _ = admin.request("PATCH", "/api/invoice-settings", {
+            **settings, "payment_terms_days": 7, "iban": "DE02120300000000202051",
+            "bic": "BYLADEM1001", "bank_name": "Beispielbank",
+        })
+        self.assertEqual(status, 200)
+        status, paid_invoice, _ = admin.request("POST", f"/api/licenses/{beta['id']}/invoice", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(paid_invoice["gross_cents"], 7900)
+        self.assertEqual(
+            (date.fromisoformat(paid_invoice["due_on"]) - date.fromisoformat(paid_invoice["issued_on"])).days,
+            7,
+        )
+        status, licenses, _ = admin.request("GET", "/api/licenses")
+        self.assertEqual(status, 200)
+        updated = next(item for item in licenses if item["id"] == beta["id"])
+        self.assertEqual(len(updated["invoices"]), 2)
+
     def test_security_headers_and_malformed_image_rejection(self):
         status, _, headers = self.client.request("GET", "/api/health")
         self.assertEqual(status, 200)
@@ -741,7 +803,10 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"Rechnungssteller", app_script)
         self.assertIn(b"new:monthly", app_script)
         self.assertIn(b"/api/invoice-settings", app_script)
-        self.assertIn(b"PDF erstellen", app_script)
+        self.assertIn(b"Rechnung erstellen", app_script)
+        self.assertIn(b'<option value="0"', app_script)
+        self.assertIn(b">Sofort</option>", app_script)
+        self.assertIn(b">30 Tage</option>", app_script)
         self.assertIn(b"strukturierte XRechnung", app_script)
         self.assertIn(b'<button class="button primary" id="add-user">Zugang manuell anlegen</button>', app_script)
         with self.assertRaises(Exception) as rejected:

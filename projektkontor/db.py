@@ -346,6 +346,22 @@ CREATE TABLE IF NOT EXISTS license_teachers (
     PRIMARY KEY(license_id, teacher_id)
 );
 
+CREATE TABLE IF NOT EXISTS license_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    license_id INTEGER NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+    changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('created','updated','converted')),
+    from_plan TEXT,
+    to_plan TEXT NOT NULL,
+    from_billing_cycle TEXT,
+    to_billing_cycle TEXT NOT NULL,
+    from_amount_cents INTEGER,
+    to_amount_cents INTEGER NOT NULL,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    changed_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS invoice_settings (
     id INTEGER PRIMARY KEY CHECK(id=1),
     business_name TEXT NOT NULL,
@@ -357,7 +373,7 @@ CREATE TABLE IF NOT EXISTS invoice_settings (
     vat_rate_basis_points INTEGER NOT NULL DEFAULT 1900 CHECK(vat_rate_basis_points BETWEEN 0 AND 10000),
     invoice_prefix TEXT NOT NULL DEFAULT 'PK',
     next_invoice_number INTEGER NOT NULL DEFAULT 1 CHECK(next_invoice_number >= 1),
-    payment_terms_days INTEGER NOT NULL DEFAULT 14 CHECK(payment_terms_days BETWEEN 0 AND 365),
+    payment_terms_days INTEGER NOT NULL DEFAULT 0 CHECK(payment_terms_days IN (0,7,14,30)),
     iban TEXT NOT NULL DEFAULT '',
     bic TEXT NOT NULL DEFAULT '',
     bank_name TEXT NOT NULL DEFAULT '',
@@ -366,7 +382,7 @@ CREATE TABLE IF NOT EXISTS invoice_settings (
 
 CREATE TABLE IF NOT EXISTS invoices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    license_id INTEGER NOT NULL UNIQUE REFERENCES licenses(id) ON DELETE RESTRICT,
+    license_id INTEGER NOT NULL REFERENCES licenses(id) ON DELETE RESTRICT,
     invoice_number TEXT NOT NULL UNIQUE,
     issued_on TEXT NOT NULL,
     service_on TEXT NOT NULL,
@@ -391,6 +407,9 @@ CREATE TABLE IF NOT EXISTS invoices (
     bic TEXT NOT NULL DEFAULT '',
     bank_name TEXT NOT NULL DEFAULT '',
     stored_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','paid','cancelled')),
+    emailed_at TEXT,
+    downloaded_at TEXT,
     created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     created_at TEXT NOT NULL
 );
@@ -410,6 +429,8 @@ CREATE INDEX IF NOT EXISTS idx_support_requests_teacher ON support_requests(teac
 CREATE INDEX IF NOT EXISTS idx_license_orders_status ON license_orders(payment_status,plan);
 CREATE INDEX IF NOT EXISTS idx_licenses_status_dates ON licenses(status,starts_on,ends_on);
 CREATE INDEX IF NOT EXISTS idx_license_teachers_teacher ON license_teachers(teacher_id,license_id);
+CREATE INDEX IF NOT EXISTS idx_license_history_license ON license_history(license_id,changed_at);
+CREATE INDEX IF NOT EXISTS idx_invoices_license ON invoices(license_id,issued_on,id);
 CREATE INDEX IF NOT EXISTS idx_invoices_issued_on ON invoices(issued_on,invoice_number);
 """
 
@@ -456,12 +477,72 @@ class Database:
                     "CHECK(billing_cycle IN ('none','monthly','annual'))"
                 )
             connection.execute("UPDATE license_orders SET billing_cycle='none' WHERE plan='beta'")
+            invoice_columns = {row[1] for row in connection.execute("PRAGMA table_info(invoices)").fetchall()}
+            invoice_indexes = connection.execute("PRAGMA index_list(invoices)").fetchall()
+            has_unique_license = False
+            for index_row in invoice_indexes:
+                if not index_row[2]:
+                    continue
+                indexed_columns = [
+                    row[2] for row in connection.execute(f"PRAGMA index_info('{index_row[1]}')").fetchall()
+                ]
+                if indexed_columns == ["license_id"]:
+                    has_unique_license = True
+                    break
+            if has_unique_license:
+                connection.execute("ALTER TABLE invoices RENAME TO invoices_legacy")
+                connection.execute(
+                    """CREATE TABLE invoices (
+                           id INTEGER PRIMARY KEY AUTOINCREMENT,
+                           license_id INTEGER NOT NULL REFERENCES licenses(id) ON DELETE RESTRICT,
+                           invoice_number TEXT NOT NULL UNIQUE,
+                           issued_on TEXT NOT NULL, service_on TEXT NOT NULL, due_on TEXT NOT NULL,
+                           customer_name TEXT NOT NULL, organization TEXT NOT NULL DEFAULT '',
+                           email TEXT NOT NULL DEFAULT '', billing_address TEXT NOT NULL,
+                           invoice_reference TEXT NOT NULL DEFAULT '', description TEXT NOT NULL,
+                           net_cents INTEGER NOT NULL, vat_rate_basis_points INTEGER NOT NULL DEFAULT 0,
+                           vat_cents INTEGER NOT NULL DEFAULT 0, gross_cents INTEGER NOT NULL,
+                           issuer_name TEXT NOT NULL, issuer_proprietor TEXT NOT NULL DEFAULT '',
+                           issuer_address TEXT NOT NULL, issuer_email TEXT NOT NULL DEFAULT '',
+                           issuer_tax_identifier TEXT NOT NULL, tax_note TEXT NOT NULL DEFAULT '',
+                           iban TEXT NOT NULL DEFAULT '', bic TEXT NOT NULL DEFAULT '',
+                           bank_name TEXT NOT NULL DEFAULT '', stored_name TEXT NOT NULL,
+                           status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','paid','cancelled')),
+                           emailed_at TEXT, downloaded_at TEXT,
+                           created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+                           created_at TEXT NOT NULL
+                       )"""
+                )
+                connection.execute(
+                    """INSERT INTO invoices(
+                           id,license_id,invoice_number,issued_on,service_on,due_on,customer_name,
+                           organization,email,billing_address,invoice_reference,description,net_cents,
+                           vat_rate_basis_points,vat_cents,gross_cents,issuer_name,issuer_proprietor,
+                           issuer_address,issuer_email,issuer_tax_identifier,tax_note,iban,bic,bank_name,
+                           stored_name,status,emailed_at,downloaded_at,created_by,created_at)
+                       SELECT id,license_id,invoice_number,issued_on,service_on,due_on,customer_name,
+                           organization,email,billing_address,invoice_reference,description,net_cents,
+                           vat_rate_basis_points,vat_cents,gross_cents,issuer_name,issuer_proprietor,
+                           issuer_address,issuer_email,issuer_tax_identifier,tax_note,iban,bic,bank_name,
+                           stored_name,'open',NULL,NULL,created_by,created_at
+                       FROM invoices_legacy"""
+                )
+                connection.execute("DROP TABLE invoices_legacy")
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_invoices_license ON invoices(license_id,issued_on,id)")
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_invoices_issued_on ON invoices(issued_on,invoice_number)")
+            else:
+                if "status" not in invoice_columns:
+                    connection.execute("ALTER TABLE invoices ADD COLUMN status TEXT NOT NULL DEFAULT 'open'")
+                if "emailed_at" not in invoice_columns:
+                    connection.execute("ALTER TABLE invoices ADD COLUMN emailed_at TEXT")
+                if "downloaded_at" not in invoice_columns:
+                    connection.execute("ALTER TABLE invoices ADD COLUMN downloaded_at TEXT")
             connection.execute(
                 """INSERT OR IGNORE INTO invoice_settings(
                        id,business_name,proprietor_name,address,email,tax_identifier,tax_mode,
                        vat_rate_basis_points,invoice_prefix,next_invoice_number,payment_terms_days,
                        iban,bic,bank_name,updated_at
-                   ) VALUES(1,?,?,?,?,?,'small_business',1900,'PK',1,14,'','','',?)""",
+                   ) VALUES(1,?,?,?,?,?,'small_business',1900,'PK',1,0,'','','',?)""",
                 (
                     "PRIMEAdvisory",
                     "Jeroen L. Jochem",
