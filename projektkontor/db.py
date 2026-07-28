@@ -348,6 +348,7 @@ CREATE TABLE IF NOT EXISTS license_orders (
 CREATE TABLE IF NOT EXISTS licenses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id INTEGER NOT NULL UNIQUE REFERENCES license_orders(id) ON DELETE RESTRICT,
+    follow_up_of INTEGER REFERENCES licenses(id) ON DELETE RESTRICT,
     seat_limit INTEGER NOT NULL CHECK(seat_limit BETWEEN 1 AND 500),
     starts_on TEXT NOT NULL,
     ends_on TEXT NOT NULL,
@@ -512,6 +513,8 @@ class Database:
             license_columns = {row[1] for row in connection.execute("PRAGMA table_info(licenses)").fetchall()}
             if "archived_at" not in license_columns:
                 connection.execute("ALTER TABLE licenses ADD COLUMN archived_at TEXT")
+            if "follow_up_of" not in license_columns:
+                connection.execute("ALTER TABLE licenses ADD COLUMN follow_up_of INTEGER REFERENCES licenses(id) ON DELETE RESTRICT")
             invoice_columns = {row[1] for row in connection.execute("PRAGMA table_info(invoices)").fetchall()}
             invoice_indexes = connection.execute("PRAGMA index_list(invoices)").fetchall()
             has_unique_license = False

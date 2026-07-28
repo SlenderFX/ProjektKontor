@@ -121,7 +121,7 @@ def parse_date(value: Any, field: str) -> str:
 def standard_license_dates(kind: str) -> tuple[str, str]:
     starts = datetime.now(timezone.utc).date()
     if kind == "beta":
-        ends = starts + timedelta(days=27)
+        ends = starts + timedelta(days=13)
     elif kind == "monthly":
         year = starts.year + (1 if starts.month == 12 else 0)
         month = 1 if starts.month == 12 else starts.month + 1
@@ -474,15 +474,25 @@ class App:
     def refresh_expired_licenses(self) -> None:
         today = datetime.now(timezone.utc).date().isoformat()
         expired = self.db.all("SELECT id FROM licenses WHERE status='active' AND ends_on<?", (today,))
-        if not expired:
+        scheduled = self.db.all(
+            "SELECT id FROM licenses WHERE status='draft' AND follow_up_of IS NOT NULL AND starts_on<=? AND ends_on>=?",
+            (today, today),
+        )
+        missed = self.db.all(
+            "SELECT id FROM licenses WHERE status='draft' AND follow_up_of IS NOT NULL AND ends_on<?", (today,)
+        )
+        if not expired and not scheduled and not missed:
             return
-        ids = [row["id"] for row in expired]
-        placeholders = ",".join("?" for _ in ids)
         with self.db.transaction() as connection:
-            connection.execute(
-                f"UPDATE licenses SET status='expired',updated_at=? WHERE id IN ({placeholders})",
-                (utcnow(), *ids),
-            )
+            now = utcnow()
+            for rows, status in ((expired, "expired"), (scheduled, "active"), (missed, "expired")):
+                if rows:
+                    ids = [row["id"] for row in rows]
+                    placeholders = ",".join("?" for _ in ids)
+                    connection.execute(
+                        f"UPDATE licenses SET status=?,updated_at=? WHERE id IN ({placeholders})",
+                        (status, now, *ids),
+                    )
 
     def teacher_license_valid(self, teacher_id: int) -> bool:
         self.refresh_expired_licenses()
@@ -996,7 +1006,7 @@ class App:
 
     def license_record(self, license_id: int) -> dict[str, Any] | None:
         record = self.db.one(
-            """SELECT l.id,l.order_id,l.seat_limit,l.starts_on,l.ends_on,l.status,l.archived_at,
+            """SELECT l.id,l.order_id,l.follow_up_of,l.seat_limit,l.starts_on,l.ends_on,l.status,l.archived_at,
                       l.created_at,l.updated_at,o.customer_name,o.organization,o.email,
                       o.billing_address,o.invoice_reference,o.plan,o.billing_cycle,o.amount_cents,
                       o.payment_status,o.notes
@@ -1239,7 +1249,29 @@ class App:
         owner = self.require_owner(user)
         data = self.body(environ)
         values = self.parse_license_payload(data)
+        follow_up_of = int(data.get("follow_up_of") or 0) or None
+        source = self.license_record(follow_up_of) if follow_up_of else None
+        if follow_up_of:
+            if not source or source.get("archived_at") or source["status"] != "active" or source["plan"] == "beta":
+                raise HttpError(409, "Eine Folgelizenz kann nur für eine aktive Bezahl-Lizenz geplant werden.")
+            expected_start = (date.fromisoformat(source["ends_on"]) + timedelta(days=1)).isoformat()
+            if values["starts_on"] != expected_start:
+                raise HttpError(400, f"Die Folgelizenz muss am {expected_start} beginnen.")
+            values["status"] = "draft"
+            values["payment_status"] = "not_required" if values["amount_cents"] == 0 else "open"
+            for teacher_id in values["teacher_ids"]:
+                overlap = self.db.one(
+                    """SELECT l.id FROM license_teachers lt JOIN licenses l ON l.id=lt.license_id
+                       WHERE lt.teacher_id=? AND l.id<>? AND l.archived_at IS NULL
+                         AND (l.status='active' OR (l.status='draft' AND l.follow_up_of IS NOT NULL))
+                         AND l.starts_on<=? AND l.ends_on>=? LIMIT 1""",
+                    (teacher_id, follow_up_of, values["ends_on"], values["starts_on"]),
+                )
+                if overlap:
+                    raise HttpError(409, "Mindestens ein Lehrkraftzugang hat in diesem Zeitraum bereits eine Lizenz.")
         create_teacher = bool(data.get("create_teacher"))
+        if follow_up_of and create_teacher:
+            raise HttpError(400, "Bei einer Folgelizenz kann kein neuer Lehrkraftzugang angelegt werden.")
         teacher_name = str(data.get("new_teacher_first_name", "")).strip()
         teacher_username = str(data.get("new_teacher_username", "")).strip().lower()
         teacher_email = str(data.get("new_teacher_email", "")).strip().lower()
@@ -1276,10 +1308,10 @@ class App:
                      values["payment_status"], values["notes"], now, now),
                 )
                 license_row = connection.execute(
-                    """INSERT INTO licenses(order_id,seat_limit,starts_on,ends_on,status,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?)""",
-                    (int(order.lastrowid), values["seat_limit"], values["starts_on"], values["ends_on"],
-                     values["status"], now, now),
+                    """INSERT INTO licenses(order_id,follow_up_of,seat_limit,starts_on,ends_on,status,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (int(order.lastrowid), follow_up_of, values["seat_limit"], values["starts_on"],
+                     values["ends_on"], values["status"], now, now),
                 )
                 license_id = int(license_row.lastrowid)
                 assigned_teacher_ids = list(values["teacher_ids"])
@@ -1293,7 +1325,8 @@ class App:
                     )
                     created_teacher_id = int(teacher_row.lastrowid)
                     assigned_teacher_ids.append(created_teacher_id)
-                self.transfer_teacher_assignments(connection, assigned_teacher_ids, license_id)
+                if not follow_up_of:
+                    self.transfer_teacher_assignments(connection, assigned_teacher_ids, license_id)
                 for teacher_id in assigned_teacher_ids:
                     connection.execute(
                         "INSERT INTO license_teachers(license_id,teacher_id,assigned_at) VALUES(?,?,?)",
@@ -1333,6 +1366,33 @@ class App:
         if current.get("archived_at"):
             raise HttpError(409, "Eine archivierte Lizenz kann nicht mehr bearbeitet werden.")
         values = self.parse_license_payload(self.body(environ), current)
+        is_follow_up = bool(current.get("follow_up_of"))
+        if is_follow_up:
+            source = self.license_record(current["follow_up_of"])
+            if not source:
+                raise HttpError(409, "Die ursprüngliche Lizenz der Vormerkung wurde nicht gefunden.")
+            expected_start = (date.fromisoformat(source["ends_on"]) + timedelta(days=1)).isoformat()
+            if values["starts_on"] != expected_start:
+                raise HttpError(400, f"Die Folgelizenz muss am {expected_start} beginnen.")
+            if current["status"] == "draft":
+                values["status"] = "draft"
+            for teacher_id in values["teacher_ids"]:
+                overlap = self.db.one(
+                    """SELECT l.id FROM license_teachers lt JOIN licenses l ON l.id=lt.license_id
+                       WHERE lt.teacher_id=? AND l.id NOT IN (?,?) AND l.archived_at IS NULL
+                         AND (l.status='active' OR (l.status='draft' AND l.follow_up_of IS NOT NULL))
+                         AND l.starts_on<=? AND l.ends_on>=? LIMIT 1""",
+                    (teacher_id, license_id, current["follow_up_of"], values["ends_on"], values["starts_on"]),
+                )
+                if overlap:
+                    raise HttpError(409, "Mindestens ein Lehrkraftzugang hat in diesem Zeitraum bereits eine Lizenz.")
+        commercial_fields = ("plan", "billing_cycle", "amount_cents", "seat_limit", "starts_on", "ends_on")
+        if current["status"] == "active" and current["plan"] != "beta":
+            if any(current[field] != values[field] for field in commercial_fields):
+                raise HttpError(409, "Eine aktive Bezahl-Lizenz kann nicht unmittelbar geändert werden. Planen Sie stattdessen eine Folgelizenz.")
+        if current["status"] == "active" and current["payment_status"] == "paid":
+            if values["payment_status"] not in {"paid", "refunded", "cancelled"}:
+                raise HttpError(409, "Eine bezahlte Lizenz kann nur als erstattet oder storniert gekennzeichnet werden.")
         now = utcnow()
         previous_teacher_ids = {teacher["id"] for teacher in current["teachers"]}
         affected_teacher_ids = previous_teacher_ids | set(values["teacher_ids"])
@@ -1356,7 +1416,8 @@ class App:
                 (values["seat_limit"], values["starts_on"], values["ends_on"], values["status"], now, license_id),
             )
             connection.execute("DELETE FROM license_teachers WHERE license_id=?", (license_id,))
-            self.transfer_teacher_assignments(connection, values["teacher_ids"], license_id)
+            if not is_follow_up:
+                self.transfer_teacher_assignments(connection, values["teacher_ids"], license_id)
             for teacher_id in values["teacher_ids"]:
                 connection.execute(
                     "INSERT INTO license_teachers(license_id,teacher_id,assigned_at) VALUES(?,?,?)",
@@ -1618,6 +1679,11 @@ class App:
                 "UPDATE invoice_settings SET next_invoice_number=next_invoice_number+1,updated_at=? WHERE id=1",
                 (now,),
             )
+            if is_zero_invoice:
+                connection.execute(
+                    "UPDATE license_orders SET payment_status='not_required',updated_at=? WHERE id=?",
+                    (now, license_record["order_id"]),
+                )
             invoice_id = int(cursor.lastrowid)
             connection.execute(
                 """INSERT INTO invoice_number_registry(invoice_number,invoice_id,reserved_at,retired_at)

@@ -968,6 +968,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(zero_invoice["gross_cents"], 0)
         self.assertEqual(zero_invoice["issued_on"], zero_invoice["due_on"])
+        self.assertEqual(self.app.license_record(beta["id"])["payment_status"], "not_required")
 
         status, paid, _ = admin.request("PATCH", f"/api/licenses/{beta['id']}", {
             "plan": "single", "billing_cycle": "annual", "amount_cents": 7900,
@@ -998,6 +999,69 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         updated = next(item for item in licenses if item["id"] == beta["id"])
         self.assertEqual(len(updated["invoices"]), 2)
+
+    def test_paid_active_license_is_locked_and_can_schedule_follow_up(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        _, teacher, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Erika", "username": "lehrkraft_erika"
+        })
+        today = date.today()
+        source_end = today + timedelta(days=30)
+        status, source, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Frau Vertrag", "organization": "Vertrags-BK",
+            "email": "vertrag@example.org", "billing_address": "Testweg 1\n45127 Essen",
+            "plan": "single", "billing_cycle": "annual", "amount_cents": 7900,
+            "seat_limit": 1, "payment_status": "paid", "status": "active",
+            "starts_on": today.isoformat(), "ends_on": source_end.isoformat(),
+            "teacher_ids": [teacher["id"]],
+        })
+        self.assertEqual(status, 200)
+        status, denied, _ = admin.request("PATCH", f"/api/licenses/{source['id']}", {
+            "plan": "school", "amount_cents": 59900, "seat_limit": 15,
+        })
+        self.assertEqual(status, 409)
+        self.assertIn("Folgelizenz", denied["error"])
+
+        follow_start = source_end + timedelta(days=1)
+        follow_end = follow_start + timedelta(days=364)
+        status, follow_up, _ = admin.request("POST", "/api/licenses", {
+            "follow_up_of": source["id"], "customer_name": "Frau Vertrag",
+            "organization": "Vertrags-BK", "email": "vertrag@example.org",
+            "billing_address": "Testweg 1\n45127 Essen", "plan": "school",
+            "billing_cycle": "annual", "amount_cents": 59900, "seat_limit": 15,
+            "payment_status": "paid", "status": "active",
+            "starts_on": follow_start.isoformat(), "ends_on": follow_end.isoformat(),
+            "teacher_ids": [teacher["id"]],
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(follow_up["status"], "draft")
+        self.assertEqual(follow_up["payment_status"], "open")
+        self.assertEqual(follow_up["follow_up_of"], source["id"])
+        self.assertEqual(self.app.license_record(source["id"])["status"], "active")
+        status, follow_up, _ = admin.request("PATCH", f"/api/licenses/{follow_up['id']}", {
+            "amount_cents": 64900,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(follow_up["amount_cents"], 64900)
+        assignments = self.app.db.all(
+            "SELECT license_id FROM license_teachers WHERE teacher_id=? ORDER BY license_id",
+            (teacher["id"],),
+        )
+        self.assertEqual([row["license_id"] for row in assignments], [source["id"], follow_up["id"]])
+        self.app.db.execute(
+            "UPDATE licenses SET ends_on=? WHERE id=?", ((today - timedelta(days=1)).isoformat(), source["id"])
+        )
+        self.app.db.execute(
+            "UPDATE licenses SET starts_on=?,ends_on=? WHERE id=?",
+            (today.isoformat(), (today + timedelta(days=364)).isoformat(), follow_up["id"]),
+        )
+        self.app.refresh_expired_licenses()
+        self.assertEqual(self.app.license_record(source["id"])["status"], "expired")
+        self.assertEqual(self.app.license_record(follow_up["id"])["status"], "active")
+        self.assertTrue(self.app.teacher_license_valid(teacher["id"]))
 
     def test_assigning_a_teacher_to_another_license_transfers_the_assignment(self):
         admin = Client(self.app)
@@ -1098,6 +1162,12 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"Aktuell einer aktiven Lizenz zugeordnete Lehrkraftzug\xc3\xa4nge", app_script)
         self.assertIn(b"E-Mail schreiben", app_script)
         self.assertIn(b"openLicenseId:license.id", app_script)
+        self.assertIn(b"Folgelizenz planen", app_script)
+        self.assertIn(b"Aktive Bezahl-Lizenz gesch\xc3\xbctzt", app_script)
+        self.assertIn(b"Beta-Konvertierung m\xc3\xb6glich", app_script)
+        self.assertIn(b"Vorgemerkt", app_script)
+        self.assertIn(b"Inaktive Lizenzen", app_script)
+        self.assertIn(b"Rechnung ausstehend", app_script)
         self.assertIn(b"Zugeordnete Lehrkraftzug\xc3\xa4nge", app_script)
         self.assertIn(b"Rechnungssteller", app_script)
         self.assertIn(b"new-product:", app_script)
