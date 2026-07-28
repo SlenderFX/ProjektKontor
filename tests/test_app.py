@@ -1101,6 +1101,8 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"teacher-card-list", app_script)
         self.assertIn(b'<details class="card teacher-card', app_script)
         self.assertIn(b"Zugang bearbeiten", app_script)
+        self.assertIn(b"billing-address-grid", app_script)
+        self.assertIn(b"Stra\xc3\x9fe und Hausnummer", app_script)
         self.assertIn(b"Archivieren oder l\xc3\xb6schen", app_script)
         self.assertIn(b'<option value="0"', app_script)
         self.assertIn(b">Sofort</option>", app_script)
