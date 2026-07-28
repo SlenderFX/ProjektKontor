@@ -187,6 +187,8 @@ class App:
         route("POST", r"/api/teachers")(self.create_teacher)
         route("PATCH", r"/api/teachers/(?P<teacher_id>\d+)")(self.update_teacher)
         route("GET", r"/api/licenses")(self.list_licenses)
+        route("GET", r"/api/license-requests")(self.list_license_requests)
+        route("PATCH", r"/api/license-requests/(?P<request_id>\d+)")(self.update_license_request)
         route("POST", r"/api/licenses")(self.create_license)
         route("PATCH", r"/api/licenses/(?P<license_id>\d+)")(self.update_license)
         route("GET", r"/api/invoice-settings")(self.get_invoice_settings)
@@ -636,9 +638,40 @@ class App:
             raise HttpError(429, "Es wurden zu viele Anfragen versendet. Bitte versuchen Sie es später erneut.")
         old = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
         self.db.execute("DELETE FROM contact_attempts WHERE attempted_at<?", (old,))
-        self.db.execute("INSERT INTO contact_attempts(remote_addr,attempted_at) VALUES(?,?)", (remote_addr, utcnow()))
-        self._send_contact_email(name, email, subject, message)
-        return {"ok": True, "message": "Vielen Dank. Ihre Anfrage wurde versendet."}
+        now = utcnow()
+        request_text = f"{subject} {message}".casefold()
+        if any(value in request_text for value in ("beta", "testzugang", "kostenfrei testen")):
+            request_type = "beta"
+        elif any(value in request_text for value in ("lizenz", "preis", "kaufen")):
+            request_type = "license"
+        else:
+            request_type = "contact"
+        with self.db.transaction() as connection:
+            connection.execute(
+                "INSERT INTO contact_attempts(remote_addr,attempted_at) VALUES(?,?)",
+                (remote_addr, now),
+            )
+            cursor = connection.execute(
+                """INSERT INTO license_requests(name,email,subject,message,request_type,status,
+                   email_status,email_error,created_at,updated_at)
+                   VALUES(?,?,?,?,?,'new','pending','',?,?)""",
+                (name, email, subject, message, request_type, now, now),
+            )
+            request_id = int(cursor.lastrowid)
+        try:
+            self._send_contact_email(name, email, subject, message)
+        except HttpError as exc:
+            # Ein SMTP-Ausfall darf eine bereits eingegangene Anfrage nicht verlieren.
+            self.db.execute(
+                "UPDATE license_requests SET email_status='failed',email_error=?,updated_at=? WHERE id=?",
+                (exc.message, utcnow(), request_id),
+            )
+        else:
+            self.db.execute(
+                "UPDATE license_requests SET email_status='sent',email_error='',updated_at=? WHERE id=?",
+                (utcnow(), request_id),
+            )
+        return {"ok": True, "message": "Vielen Dank. Ihre Anfrage ist bei uns eingegangen."}
 
     def _verify_turnstile(self, token: str, remote_addr: str) -> None:
         if not self.config.turnstile_sitekey or not self.config.turnstile_secret:
@@ -960,6 +993,33 @@ class App:
         self.refresh_expired_licenses()
         rows = self.db.all("SELECT id FROM licenses ORDER BY created_at DESC,id DESC")
         return [self.license_record(row["id"]) for row in rows]
+
+    def list_license_requests(self, environ, user):
+        self.require_owner(user)
+        return self.db.all(
+            """SELECT id,name,email,subject,message,request_type,status,email_status,
+                      email_error,created_at,updated_at
+               FROM license_requests
+               ORDER BY CASE status WHEN 'new' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
+                        created_at DESC,id DESC"""
+        )
+
+    def update_license_request(self, environ, user, request_id):
+        self.require_owner(user)
+        if not self.db.one("SELECT id FROM license_requests WHERE id=?", (request_id,)):
+            raise HttpError(404, "Anfrage nicht gefunden.")
+        status = str(self.body(environ).get("status", "")).strip()
+        if status not in {"new", "in_progress", "converted", "closed"}:
+            raise HttpError(400, "Der Bearbeitungsstatus ist ungültig.")
+        self.db.execute(
+            "UPDATE license_requests SET status=?,updated_at=? WHERE id=?",
+            (status, utcnow(), request_id),
+        )
+        return self.db.one(
+            """SELECT id,name,email,subject,message,request_type,status,email_status,
+                      email_error,created_at,updated_at FROM license_requests WHERE id=?""",
+            (request_id,),
+        )
 
     def parse_license_payload(self, data: dict[str, Any], current: dict[str, Any] | None = None) -> dict[str, Any]:
         plan = str(data.get("plan", current["plan"] if current else "")).strip()

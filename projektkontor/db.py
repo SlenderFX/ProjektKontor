@@ -270,6 +270,20 @@ CREATE TABLE IF NOT EXISTS contact_attempts (
     attempted_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS license_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    message TEXT NOT NULL,
+    request_type TEXT NOT NULL DEFAULT 'contact' CHECK(request_type IN ('beta','license','contact')),
+    status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','in_progress','converted','closed')),
+    email_status TEXT NOT NULL DEFAULT 'pending' CHECK(email_status IN ('pending','sent','failed')),
+    email_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS privacy_acceptances (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     privacy_version TEXT NOT NULL,
@@ -388,6 +402,7 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
 CREATE INDEX IF NOT EXISTS idx_login_attempts ON login_attempts(username,remote_addr,attempted_at);
 CREATE INDEX IF NOT EXISTS idx_contact_attempts ON contact_attempts(remote_addr,attempted_at);
+CREATE INDEX IF NOT EXISTS idx_license_requests_status ON license_requests(status,created_at);
 CREATE INDEX IF NOT EXISTS idx_pending_logins_user ON pending_logins(user_id,expires_at);
 CREATE INDEX IF NOT EXISTS idx_deadline_requests_task ON deadline_requests(task_id,status);
 CREATE INDEX IF NOT EXISTS idx_teacher_classes_class ON teacher_classes(class_id,teacher_id);

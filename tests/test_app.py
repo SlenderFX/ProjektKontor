@@ -15,7 +15,7 @@ from openpyxl import Workbook, load_workbook
 
 from projektkontor.backup import create_backup
 from projektkontor.config import Config
-from projektkontor.server import App
+from projektkontor.server import App, HttpError
 
 TEST_TEACHER_PASSWORD = "persoenliches-testkennwort"
 
@@ -851,6 +851,38 @@ class AppFlowTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         verify.assert_called_once_with("verified-token", "unknown")
         send.assert_called_once_with("Erika Beispiel", "erika@example.org", "Testzugang", "Ich möchte ProjektKontor gerne kennenlernen.")
+        saved = self.app.db.one("SELECT * FROM license_requests")
+        self.assertEqual(saved["name"], "Erika Beispiel")
+        self.assertEqual(saved["request_type"], "beta")
+        self.assertEqual(saved["status"], "new")
+        self.assertEqual(saved["email_status"], "sent")
+
+        with patch.object(self.app, "_verify_turnstile"), patch.object(
+            self.app, "_send_contact_email", side_effect=HttpError(503, "Mailversand nicht eingerichtet")
+        ):
+            status, result, _ = self.client.request(
+                "POST", "/api/contact", {**payload, "email": "zweite@example.org"}
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        failed = self.app.db.one(
+            "SELECT * FROM license_requests WHERE email=?",
+            ("zweite@example.org",),
+        )
+        self.assertEqual(failed["email_status"], "failed")
+
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        status, requests, _ = admin.request("GET", "/api/license-requests")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(requests), 2)
+        status, updated, _ = admin.request(
+            "PATCH", f"/api/license-requests/{requests[0]['id']}", {"status": "closed"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["status"], "closed")
 
         config = Config(
             "127.0.0.1", 8080, Path(self.temp.name), 25 * 1024 * 1024,
