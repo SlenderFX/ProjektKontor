@@ -853,7 +853,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"new:monthly", app_script)
         self.assertIn(b"/api/invoice-settings", app_script)
         self.assertIn(b"Rechnung erstellen", app_script)
-        self.assertIn(b"PDF herunterladen", app_script)
+        self.assertIn(b'class="button small download-invoice"', app_script)
         self.assertIn(b"Lizenzdetails", app_script)
         self.assertIn(b"Konto & Zuordnung", app_script)
         self.assertIn(b'<option value="0"', app_script)
