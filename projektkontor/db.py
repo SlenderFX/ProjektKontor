@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS users (
     class_id INTEGER REFERENCES classes(id) ON DELETE SET NULL,
     first_name TEXT NOT NULL,
     username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    email TEXT NOT NULL DEFAULT '',
     credential TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('teacher','student')),
     is_owner INTEGER NOT NULL DEFAULT 0,
@@ -46,6 +47,8 @@ CREATE TABLE IF NOT EXISTS users (
     license_managed INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     last_login_at TEXT,
+    initial_credentials_emailed_at TEXT,
+    archived_at TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -284,6 +287,20 @@ CREATE TABLE IF NOT EXISTS license_requests (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS license_products (
+    product_key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    plan TEXT NOT NULL CHECK(plan IN ('beta','single','department','school')),
+    billing_cycle TEXT NOT NULL CHECK(billing_cycle IN ('none','monthly','annual')),
+    amount_cents INTEGER NOT NULL CHECK(amount_cents >= 0),
+    seat_limit INTEGER NOT NULL CHECK(seat_limit BETWEEN 1 AND 500),
+    duration_unit TEXT NOT NULL CHECK(duration_unit IN ('days','months','years')),
+    duration_value INTEGER NOT NULL CHECK(duration_value BETWEEN 1 AND 1200),
+    active INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS privacy_acceptances (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     privacy_version TEXT NOT NULL,
@@ -335,6 +352,7 @@ CREATE TABLE IF NOT EXISTS licenses (
     starts_on TEXT NOT NULL,
     ends_on TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','active','suspended','expired','cancelled')),
+    archived_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -410,8 +428,16 @@ CREATE TABLE IF NOT EXISTS invoices (
     status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','paid','cancelled')),
     emailed_at TEXT,
     downloaded_at TEXT,
+    archived_at TEXT,
     created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS invoice_number_registry (
+    invoice_number TEXT PRIMARY KEY,
+    invoice_id INTEGER UNIQUE,
+    reserved_at TEXT NOT NULL,
+    retired_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
@@ -470,6 +496,12 @@ class Database:
                 connection.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
             if "license_managed" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN license_managed INTEGER NOT NULL DEFAULT 0")
+            if "email" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+            if "initial_credentials_emailed_at" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN initial_credentials_emailed_at TEXT")
+            if "archived_at" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN archived_at TEXT")
             order_columns = {row[1] for row in connection.execute("PRAGMA table_info(license_orders)").fetchall()}
             if "billing_cycle" not in order_columns:
                 connection.execute(
@@ -477,6 +509,9 @@ class Database:
                     "CHECK(billing_cycle IN ('none','monthly','annual'))"
                 )
             connection.execute("UPDATE license_orders SET billing_cycle='none' WHERE plan='beta'")
+            license_columns = {row[1] for row in connection.execute("PRAGMA table_info(licenses)").fetchall()}
+            if "archived_at" not in license_columns:
+                connection.execute("ALTER TABLE licenses ADD COLUMN archived_at TEXT")
             invoice_columns = {row[1] for row in connection.execute("PRAGMA table_info(invoices)").fetchall()}
             invoice_indexes = connection.execute("PRAGMA index_list(invoices)").fetchall()
             has_unique_license = False
@@ -508,7 +543,7 @@ class Database:
                            iban TEXT NOT NULL DEFAULT '', bic TEXT NOT NULL DEFAULT '',
                            bank_name TEXT NOT NULL DEFAULT '', stored_name TEXT NOT NULL,
                            status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','paid','cancelled')),
-                           emailed_at TEXT, downloaded_at TEXT,
+                           emailed_at TEXT, downloaded_at TEXT, archived_at TEXT,
                            created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
                            created_at TEXT NOT NULL
                        )"""
@@ -519,12 +554,12 @@ class Database:
                            organization,email,billing_address,invoice_reference,description,net_cents,
                            vat_rate_basis_points,vat_cents,gross_cents,issuer_name,issuer_proprietor,
                            issuer_address,issuer_email,issuer_tax_identifier,tax_note,iban,bic,bank_name,
-                           stored_name,status,emailed_at,downloaded_at,created_by,created_at)
+                           stored_name,status,emailed_at,downloaded_at,archived_at,created_by,created_at)
                        SELECT id,license_id,invoice_number,issued_on,service_on,due_on,customer_name,
                            organization,email,billing_address,invoice_reference,description,net_cents,
                            vat_rate_basis_points,vat_cents,gross_cents,issuer_name,issuer_proprietor,
                            issuer_address,issuer_email,issuer_tax_identifier,tax_note,iban,bic,bank_name,
-                           stored_name,'open',NULL,NULL,created_by,created_at
+                           stored_name,'open',NULL,NULL,NULL,created_by,created_at
                        FROM invoices_legacy"""
                 )
                 connection.execute("DROP TABLE invoices_legacy")
@@ -537,6 +572,23 @@ class Database:
                     connection.execute("ALTER TABLE invoices ADD COLUMN emailed_at TEXT")
                 if "downloaded_at" not in invoice_columns:
                     connection.execute("ALTER TABLE invoices ADD COLUMN downloaded_at TEXT")
+                if "archived_at" not in invoice_columns:
+                    connection.execute("ALTER TABLE invoices ADD COLUMN archived_at TEXT")
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS invoice_number_registry (
+                       invoice_number TEXT PRIMARY KEY,
+                       invoice_id INTEGER UNIQUE,
+                       reserved_at TEXT NOT NULL,
+                       retired_at TEXT
+                   )"""
+            )
+            connection.execute(
+                """INSERT OR IGNORE INTO invoice_number_registry(
+                       invoice_number,invoice_id,reserved_at,retired_at
+                   ) SELECT invoice_number,id,created_at,
+                            CASE WHEN archived_at IS NOT NULL THEN archived_at ELSE NULL END
+                     FROM invoices"""
+            )
             connection.execute(
                 """INSERT OR IGNORE INTO invoice_settings(
                        id,business_name,proprietor_name,address,email,tax_identifier,tax_mode,
@@ -557,6 +609,21 @@ class Database:
             connection.execute(
                 "UPDATE invoice_settings SET vat_rate_basis_points=0 WHERE tax_mode='small_business'"
             )
+            product_defaults = (
+                ("beta", "Beta-Test", "beta", "none", 0, 1, "days", 28, 10),
+                ("single_monthly", "Einzellizenz monatlich", "single", "monthly", 890, 1, "months", 1, 20),
+                ("single_annual", "Einzellizenz jährlich", "single", "annual", 7900, 1, "years", 1, 30),
+                ("department", "Fachbereichslizenz", "department", "annual", 29900, 5, "years", 1, 40),
+                ("school", "Schullizenz", "school", "annual", 59900, 15, "years", 1, 50),
+            )
+            for product in product_defaults:
+                connection.execute(
+                    """INSERT OR IGNORE INTO license_products(
+                           product_key,name,plan,billing_cycle,amount_cents,seat_limit,
+                           duration_unit,duration_value,active,sort_order,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
+                    (*product, utcnow()),
+                )
             # Ab Version 3 benötigen sämtliche Lehrkraftkonten eine aktive
             # Lizenz; alte Bestandskonten werden nicht mehr stillschweigend
             # freigeschaltet.

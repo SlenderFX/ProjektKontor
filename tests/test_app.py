@@ -587,7 +587,7 @@ class AppFlowTest(unittest.TestCase):
             "teacher_ids": [first["id"]],
         })
         self.assertEqual(status, 400)
-        self.assertIn("höchstens vier Wochen", rejected["error"])
+        self.assertIn("gemäß Produktvorgabe", rejected["error"])
 
         status, license_record, _ = admin.request("POST", "/api/licenses", {
             "customer_name": "Frau Beispiel", "organization": "Beispiel-BK",
@@ -743,6 +743,200 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(self.app.teacher_license_valid(unassigned["id"]))
 
+    def test_license_creation_can_atomically_create_and_assign_teacher(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        status, license_record, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Frau Direkt", "organization": "Direkt-BK",
+            "plan": "single", "billing_cycle": "annual", "seat_limit": 1,
+            "amount_cents": 7900, "payment_status": "open", "status": "active",
+            "starts_on": "2020-01-01", "ends_on": "2099-12-31",
+            "teacher_ids": [], "create_teacher": True,
+            "new_teacher_first_name": "Frau Direkt",
+            "new_teacher_username": "lehrkraft_direkt",
+            "new_teacher_email": "direkt@example.org",
+        })
+        self.assertEqual(status, 200)
+        created = license_record["created_teacher"]
+        self.assertEqual(created["username"], "lehrkraft_direkt")
+        self.assertTrue(created["initial_password"])
+        self.assertEqual(license_record["used_seats"], 1)
+        self.assertEqual(license_record["teachers"][0]["id"], created["id"])
+        self.assertTrue(self.app.teacher_license_valid(created["id"]))
+        object.__setattr__(self.app.config, "smtp_host", "mail.gmx.net")
+        object.__setattr__(self.app.config, "smtp_username", "konto@gmx.de")
+        object.__setattr__(self.app.config, "smtp_password", "anwendungspasswort")
+        with patch("projektkontor.server.smtplib.SMTP_SSL") as smtp:
+            smtp.return_value.__enter__.return_value = smtp.return_value
+            mail_status, mailed, _ = admin.request(
+                "POST", f"/api/teachers/{created['id']}/initial-credentials/email",
+                {"initial_password": created["initial_password"]},
+            )
+            message = smtp.return_value.send_message.call_args.args[0]
+        self.assertEqual(mail_status, 200)
+        self.assertTrue(mailed["ok"])
+        self.assertEqual(message["To"], "direkt@example.org")
+        self.assertIn("lehrkraft_direkt", message.get_content())
+        self.assertIn(created["initial_password"], message.get_content())
+        self.assertTrue(
+            self.app.db.one("SELECT initial_credentials_emailed_at FROM users WHERE id=?", (created["id"],))[
+                "initial_credentials_emailed_at"
+            ]
+        )
+
+        duplicate_status, duplicate, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Doppelt", "plan": "single", "billing_cycle": "annual",
+            "seat_limit": 1, "amount_cents": 7900, "payment_status": "open",
+            "status": "active", "starts_on": "2020-01-01", "ends_on": "2099-12-31",
+            "teacher_ids": [], "create_teacher": True,
+            "new_teacher_first_name": "Noch einmal",
+            "new_teacher_username": "lehrkraft_direkt",
+            "new_teacher_email": "doppelt@example.org",
+        })
+        self.assertEqual(duplicate_status, 409)
+        self.assertIn("bereits vergeben", duplicate["error"])
+        self.assertEqual(self.app.db.one("SELECT COUNT(*) count FROM licenses")["count"], 1)
+        self.assertEqual(self.app.db.one("SELECT COUNT(*) count FROM license_orders")["count"], 1)
+
+    def test_license_can_be_archived_or_permanently_deleted_with_invoices(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        _, settings, _ = admin.request("GET", "/api/invoice-settings")
+        admin.request("PATCH", "/api/invoice-settings", {
+            **settings, "iban": "DE02120300000000202051", "bic": "BYLADEM1001",
+            "bank_name": "Beispielbank",
+        })
+        status, license_record, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Archiv Test", "organization": "Archiv-BK",
+            "email": "archiv@example.org", "billing_address": "Testweg 1\n45127 Essen",
+            "plan": "single", "billing_cycle": "annual", "seat_limit": 1,
+            "amount_cents": 7900, "payment_status": "open", "status": "active",
+            "starts_on": "2020-01-01", "ends_on": "2099-12-31", "teacher_ids": [],
+        })
+        self.assertEqual(status, 200)
+        invoice_status, invoice, _ = admin.request(
+            "POST", f"/api/licenses/{license_record['id']}/invoice", {}
+        )
+        self.assertEqual(invoice_status, 200)
+        stored_name = self.app.db.one("SELECT stored_name FROM invoices WHERE id=?", (invoice["id"],))["stored_name"]
+        invoice_path = self.app.config.report_dir / stored_name
+        self.assertTrue(invoice_path.is_file())
+
+        archive_status, archived, _ = admin.request(
+            "POST", f"/api/licenses/{license_record['id']}/archive", {}
+        )
+        self.assertEqual(archive_status, 200)
+        self.assertEqual(archived["status"], "cancelled")
+        self.assertTrue(archived["archived_at"])
+        self.assertTrue(invoice_path.is_file())
+
+        rejected_status, rejected, _ = admin.request(
+            "DELETE", f"/api/licenses/{license_record['id']}", {}
+        )
+        self.assertEqual(rejected_status, 400)
+        self.assertIn("endgültige Löschen", rejected["error"])
+        delete_status, deleted, _ = admin.request(
+            "DELETE", f"/api/licenses/{license_record['id']}", {"confirm_permanent_delete": True}
+        )
+        self.assertEqual(delete_status, 200)
+        self.assertTrue(deleted["ok"])
+        self.assertIsNone(self.app.db.one("SELECT id FROM licenses WHERE id=?", (license_record["id"],)))
+        self.assertIsNone(self.app.db.one("SELECT id FROM invoices WHERE id=?", (invoice["id"],)))
+        retained = self.app.db.one(
+            "SELECT invoice_id,retired_at FROM invoice_number_registry WHERE invoice_number=?",
+            (invoice["invoice_number"],),
+        )
+        self.assertIsNone(retained["invoice_id"])
+        self.assertTrue(retained["retired_at"])
+        self.assertFalse(invoice_path.exists())
+
+    def test_teacher_accounts_can_be_archived_restored_or_safely_deleted(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        _, unused, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Versehentlich", "username": "lehrkraft_versehen"
+        })
+        status, _, _ = admin.request("DELETE", f"/api/teachers/{unused['id']}", {})
+        self.assertEqual(status, 400)
+        status, deleted, _ = admin.request(
+            "DELETE", f"/api/teachers/{unused['id']}", {"confirm_permanent_delete": True}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted["deleted_id"], unused["id"])
+        self.assertIsNone(self.app.db.one("SELECT id FROM users WHERE id=?", (unused["id"],)))
+
+        _, used, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Genutzt", "username": "lehrkraft_genutzt"
+        })
+        self.app.db.execute(
+            "UPDATE users SET last_login_at=? WHERE id=?", ("2026-07-28T07:00:00+00:00", used["id"])
+        )
+        status, blocked, _ = admin.request(
+            "DELETE", f"/api/teachers/{used['id']}", {"confirm_permanent_delete": True}
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("nur archiviert", blocked["error"])
+        status, archived, _ = admin.request("POST", f"/api/teachers/{used['id']}/archive", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(archived["archived_at"])
+        account = self.app.db.one("SELECT active,archived_at FROM users WHERE id=?", (used["id"],))
+        self.assertEqual(account["active"], 0)
+        self.assertTrue(account["archived_at"])
+        status, restored, _ = admin.request("POST", f"/api/teachers/{used['id']}/restore", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(restored["restored"])
+        account = self.app.db.one("SELECT active,archived_at FROM users WHERE id=?", (used["id"],))
+        self.assertEqual(account, {"active": 1, "archived_at": None})
+
+    def test_invoice_archive_and_delete_never_reuses_invoice_numbers(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        _, license_record, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Testkundin", "organization": "Test-BK",
+            "billing_address": "Testweg 1\n45127 Essen", "plan": "beta",
+            "amount_cents": 0, "seat_limit": 1, "payment_status": "not_required",
+            "status": "active", "starts_on": "2026-07-01", "ends_on": "2026-07-28",
+            "teacher_ids": [],
+        })
+        _, first, _ = admin.request(
+            "POST", f"/api/licenses/{license_record['id']}/invoice", {"confirm_zero_invoice": True}
+        )
+        _, second, _ = admin.request(
+            "POST", f"/api/licenses/{license_record['id']}/invoice", {"confirm_zero_invoice": True}
+        )
+        status, archived, _ = admin.request("POST", f"/api/invoices/{first['id']}/archive", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(archived["status"], "cancelled")
+        self.assertTrue(archived["archived_at"])
+        status, denied, _ = admin.request("POST", f"/api/invoices/{first['id']}/email", {})
+        self.assertEqual(status, 409)
+        self.assertIn("stornierte", denied["error"])
+
+        status, deleted, _ = admin.request(
+            "DELETE", f"/api/invoices/{second['id']}", {"confirm_permanent_delete": True}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted["retained_invoice_number"], second["invoice_number"])
+        registry = self.app.db.one(
+            "SELECT invoice_id,retired_at FROM invoice_number_registry WHERE invoice_number=?",
+            (second["invoice_number"],),
+        )
+        self.assertIsNone(registry["invoice_id"])
+        self.assertTrue(registry["retired_at"])
+        _, third, _ = admin.request(
+            "POST", f"/api/licenses/{license_record['id']}/invoice", {"confirm_zero_invoice": True}
+        )
+        self.assertNotEqual(third["invoice_number"], second["invoice_number"])
+        self.assertTrue(third["invoice_number"].endswith("0003"))
+
     def test_beta_invoice_conversion_history_and_payment_terms(self):
         admin = Client(self.app)
         admin.request("POST", "/api/setup", {
@@ -839,6 +1033,48 @@ class AppFlowTest(unittest.TestCase):
         )
         self.assertEqual(assignment["license_id"], second["id"])
 
+    def test_license_product_catalog_updates_only_future_licenses(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        status, products, _ = admin.request("GET", "/api/license-products")
+        self.assertEqual(status, 200)
+        monthly = next(product for product in products if product["product_key"] == "single_monthly")
+        self.assertEqual(monthly["amount_cents"], 890)
+        _, first_teacher, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Altpreis", "username": "lehrkraft_altpreis",
+            "license_selection": "new-product:single_monthly",
+        })
+        first_license = self.app.db.one(
+            """SELECT o.amount_cents,l.starts_on,l.ends_on FROM license_teachers lt
+                 JOIN licenses l ON l.id=lt.license_id JOIN license_orders o ON o.id=l.order_id
+                WHERE lt.teacher_id=?""", (first_teacher["id"],),
+        )
+        self.assertEqual(first_license["amount_cents"], 890)
+
+        status, updated, _ = admin.request("PATCH", "/api/license-products/single_monthly", {
+            "name": "Einzellizenz Flex", "amount_cents": 990, "seat_limit": 1,
+            "duration_value": 2, "duration_unit": "months", "active": True,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["amount_cents"], 990)
+        _, second_teacher, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Neupreis", "username": "lehrkraft_neupreis",
+            "license_selection": "new-product:single_monthly",
+        })
+        second_license = self.app.db.one(
+            """SELECT o.amount_cents,l.starts_on,l.ends_on FROM license_teachers lt
+                 JOIN licenses l ON l.id=lt.license_id JOIN license_orders o ON o.id=l.order_id
+                WHERE lt.teacher_id=?""", (second_teacher["id"],),
+        )
+        self.assertEqual(second_license["amount_cents"], 990)
+        self.assertEqual(first_license["amount_cents"], 890)
+        self.assertGreater(
+            (date.fromisoformat(second_license["ends_on"]) - date.fromisoformat(second_license["starts_on"])).days,
+            45,
+        )
+
     def test_security_headers_and_malformed_image_rejection(self):
         status, _, headers = self.client.request("GET", "/api/health")
         self.assertEqual(status, 200)
@@ -857,12 +1093,13 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"async function renderLicenses()", app_script)
         self.assertIn(b"Zugeordnete Lehrkraftzug\xc3\xa4nge", app_script)
         self.assertIn(b"Rechnungssteller", app_script)
-        self.assertIn(b"new:monthly", app_script)
+        self.assertIn(b"new-product:", app_script)
         self.assertIn(b"/api/invoice-settings", app_script)
         self.assertIn(b"Rechnung erstellen", app_script)
         self.assertIn(b'class="button small download-invoice"', app_script)
         self.assertIn(b"Lizenzdetails", app_script)
-        self.assertIn(b"Konto & Zuordnung", app_script)
+        self.assertIn(b"teacher-card-clickable", app_script)
+        self.assertIn(b"Archivieren oder l\xc3\xb6schen", app_script)
         self.assertIn(b'<option value="0"', app_script)
         self.assertIn(b">Sofort</option>", app_script)
         self.assertIn(b">30 Tage</option>", app_script)
