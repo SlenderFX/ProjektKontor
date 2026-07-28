@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import base64
 import re
 import unicodedata
 from datetime import datetime
@@ -25,7 +24,7 @@ NAVY = colors.HexColor("#0F2E5D")
 SAGE = colors.HexColor("#6F8B74")
 LIGHT = colors.HexColor("#E6E9ED")
 PRIME_PETROL = colors.HexColor("#375F79")
-PRIMEADVISORY_LOGO_B64 = Path(__file__).resolve().parent / "static" / "primeadvisory-logo.png.b64"
+PRIMEADVISORY_MARK = Path(__file__).resolve().parent / "static" / "primeadvisory-mark.png"
 
 
 def safe_paragraph(value: Any) -> str:
@@ -73,11 +72,9 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     issuer_lines += f"<br/>{safe_paragraph(invoice['issuer_address'])}"
     if invoice.get("issuer_email"):
         issuer_lines += f"<br/>{safe_paragraph(invoice['issuer_email'])}"
-    if not PRIMEADVISORY_LOGO_B64.is_file():
-        raise RuntimeError("Das originale PRIMEAdvisory-Logo fehlt.")
-    encoded_logo = "".join(PRIMEADVISORY_LOGO_B64.read_text(encoding="ascii").split())
-    logo_bytes = base64.b64decode(encoded_logo, validate=True)
-    logo_source = PILImage.open(io.BytesIO(logo_bytes)).convert("RGBA")
+    if not PRIMEADVISORY_MARK.is_file():
+        raise RuntimeError("Das originale PRIMEAdvisory-Signet fehlt.")
+    logo_source = PILImage.open(PRIMEADVISORY_MARK).convert("RGBA")
     logo_bounds = logo_source.getchannel("A").getbbox()
     if not logo_bounds:
         raise RuntimeError("Das originale PRIMEAdvisory-Logo enthält keine sichtbaren Bildpunkte.")
@@ -85,9 +82,8 @@ def generate_invoice_pdf(invoice: dict[str, Any]) -> bytes:
     cropped_logo_bytes = io.BytesIO()
     cropped_logo.save(cropped_logo_bytes, format="PNG", optimize=True)
     cropped_logo_bytes.seek(0)
-    logo_width = 52 * mm
-    logo_height = logo_width * cropped_logo.height / cropped_logo.width
-    brand = Image(cropped_logo_bytes, width=logo_width, height=logo_height)
+    logo_size = 20 * mm
+    brand = Image(cropped_logo_bytes, width=logo_size, height=logo_size)
     header = Table([
         [
             brand,
