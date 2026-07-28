@@ -610,7 +610,7 @@ class Database:
                 "UPDATE invoice_settings SET vat_rate_basis_points=0 WHERE tax_mode='small_business'"
             )
             product_defaults = (
-                ("beta", "Beta-Test", "beta", "none", 0, 1, "days", 28, 10),
+                ("beta", "Beta-Test", "beta", "none", 0, 1, "days", 14, 10),
                 ("single_monthly", "Einzellizenz monatlich", "single", "monthly", 890, 1, "months", 1, 20),
                 ("single_annual", "Einzellizenz jährlich", "single", "annual", 7900, 1, "years", 1, 30),
                 ("department", "Fachbereichslizenz", "department", "annual", 29900, 5, "years", 1, 40),

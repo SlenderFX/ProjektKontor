@@ -903,7 +903,7 @@ class AppFlowTest(unittest.TestCase):
             "customer_name": "Testkundin", "organization": "Test-BK",
             "billing_address": "Testweg 1\n45127 Essen", "plan": "beta",
             "amount_cents": 0, "seat_limit": 1, "payment_status": "not_required",
-            "status": "active", "starts_on": "2026-07-01", "ends_on": "2026-07-28",
+            "status": "active", "starts_on": "2026-07-01", "ends_on": "2026-07-14",
             "teacher_ids": [],
         })
         _, first, _ = admin.request(
@@ -956,7 +956,7 @@ class AppFlowTest(unittest.TestCase):
             "email": "beta@example.org", "billing_address": "Testweg 1\n45127 Essen",
             "plan": "beta", "amount_cents": 0, "seat_limit": 1,
             "payment_status": "not_required", "status": "active",
-            "starts_on": "2026-07-01", "ends_on": "2026-07-28", "teacher_ids": [],
+            "starts_on": "2026-07-01", "ends_on": "2026-07-14", "teacher_ids": [],
         })
         self.assertEqual(status, 200)
         status, warning, _ = admin.request("POST", f"/api/licenses/{beta['id']}/invoice", {})
@@ -1093,6 +1093,9 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"async function renderLicenses(options={})", app_script)
         self.assertIn(b"Zahlungsziel verpasst", app_script)
         self.assertIn(b"paymentDashboardMarkup", app_script)
+        self.assertIn(b"occupiedTeachersMarkup", app_script)
+        self.assertIn(b'id="license-workspace"', app_script)
+        self.assertIn(b"Aktuell einer aktiven Lizenz zugeordnete Lehrkraftzug\xc3\xa4nge", app_script)
         self.assertIn(b"E-Mail schreiben", app_script)
         self.assertIn(b"openLicenseId:license.id", app_script)
         self.assertIn(b"Zugeordnete Lehrkraftzug\xc3\xa4nge", app_script)
@@ -1156,7 +1159,8 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"ab 599 \xe2\x82\xac", landing)
         self.assertIn(b'id="beta-dialog"', landing)
         self.assertIn(b"begrenzte Anzahl kostenfreier Beta-Testzug\xc3\xa4nge", landing)
-        self.assertIn(b"4 Wochen kostenfrei testen", landing)
+        self.assertIn(b"14 Tage kostenfrei testen", landing)
+        self.assertIn(b"f\xc3\xbcr 14 Tage", landing)
         self.assertNotIn(b"6\xe2\x80\x938 Wochen", landing)
         self.assertEqual(landing.count(b"Keine automatische Verl\xc3\xa4ngerung"), 1)
         self.assertIn(b"Nachhaltige Sch\xc3\xbclerfirma", landing)

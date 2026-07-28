@@ -1506,7 +1506,7 @@ class App:
     @staticmethod
     def invoice_description(license_record: dict[str, Any]) -> str:
         if license_record["plan"] == "beta":
-            return "ProjektKontor Beta-Testzugang - kostenfreie vierwöchige Testlizenz"
+            return "ProjektKontor Beta-Testzugang - kostenfreie Testlizenz"
         if license_record["plan"] == "single":
             cycle = "Monatszugang" if license_record.get("billing_cycle") == "monthly" else "Jahreszugang"
             return f"ProjektKontor Einzellizenz - {cycle} für eine Lehrkraft"
