@@ -967,8 +967,20 @@ class AppFlowTest(unittest.TestCase):
         })
         self.assertEqual(status, 200)
         self.assertEqual(zero_invoice["gross_cents"], 0)
+        self.assertEqual(zero_invoice["status"], "paid")
         self.assertEqual(zero_invoice["issued_on"], zero_invoice["due_on"])
         self.assertEqual(self.app.license_record(beta["id"])["payment_status"], "not_required")
+        self.app.db.execute(
+            "UPDATE invoices SET status='open',due_on=? WHERE id=?",
+            ((date.today() - timedelta(days=1)).isoformat(), zero_invoice["id"]),
+        )
+        self.app.db.execute(
+            "UPDATE license_orders SET payment_status='overdue' WHERE id=?", (beta["order_id"],)
+        )
+        self.app.run_license_automation()
+        repaired = self.app.license_record(beta["id"])
+        self.assertEqual(repaired["payment_status"], "not_required")
+        self.assertEqual(repaired["invoices"][0]["status"], "paid")
 
         status, paid, _ = admin.request("PATCH", f"/api/licenses/{beta['id']}", {
             "plan": "single", "billing_cycle": "annual", "amount_cents": 7900,
@@ -1353,6 +1365,9 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"Lizenz direkt zuordnen", app_script)
         self.assertIn(b"teacher-archive-section", app_script)
         self.assertIn(b"Archivieren oder l\xc3\xb6schen", app_script)
+        styles = self.client.request("GET", "/styles.css")[1]
+        self.assertIn(b".license-card[open],.teacher-card[open]", styles)
+        self.assertIn(b"border-color:var(--navy)", styles)
         self.assertIn(b'<option value="0"', app_script)
         self.assertIn(b">Sofort</option>", app_script)
         self.assertIn(b">30 Tage</option>", app_script)

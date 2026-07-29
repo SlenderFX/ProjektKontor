@@ -518,10 +518,19 @@ class App:
 
         self.refresh_expired_licenses()
         self.db.execute(
+            "UPDATE invoices SET status='paid' WHERE gross_cents=0 AND status='open'"
+        )
+        self.db.execute(
+            """UPDATE license_orders SET payment_status='not_required',updated_at=?
+                 WHERE amount_cents=0 AND payment_status IN ('open','overdue')""",
+            (now,),
+        )
+        self.db.execute(
             """UPDATE license_orders SET payment_status='overdue',updated_at=?
                  WHERE payment_status='open' AND id IN (
                    SELECT l.order_id FROM licenses l JOIN invoices i ON i.license_id=l.id
-                    WHERE i.status='open' AND i.archived_at IS NULL AND i.due_on<?
+                    WHERE i.status='open' AND i.gross_cents>0
+                      AND i.archived_at IS NULL AND i.due_on<?
                  )""",
             (now, today),
         )
@@ -1913,7 +1922,7 @@ class App:
                     snapshot["issuer_proprietor"], snapshot["issuer_address"],
                     snapshot["issuer_email"], snapshot["issuer_tax_identifier"], tax_note,
                     snapshot["iban"], snapshot["bic"], snapshot["bank_name"], stored_name,
-                    "open", owner["id"], now,
+                    "paid" if is_zero_invoice else "open", owner["id"], now,
                 ),
             )
             connection.execute(

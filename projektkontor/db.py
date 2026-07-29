@@ -603,6 +603,15 @@ class Database:
                     connection.execute("ALTER TABLE invoices ADD COLUMN downloaded_at TEXT")
                 if "archived_at" not in invoice_columns:
                     connection.execute("ALTER TABLE invoices ADD COLUMN archived_at TEXT")
+            # Nullrechnungen haben kein Zahlungsziel. Frühere Versionen legten
+            # sie technisch als "open" an, obwohl der Auftrag kostenfrei war.
+            connection.execute(
+                "UPDATE invoices SET status='paid' WHERE gross_cents=0 AND status='open'"
+            )
+            connection.execute(
+                """UPDATE license_orders SET payment_status='not_required'
+                     WHERE amount_cents=0 AND payment_status IN ('open','overdue')"""
+            )
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS invoice_number_registry (
                        invoice_number TEXT PRIMARY KEY,
