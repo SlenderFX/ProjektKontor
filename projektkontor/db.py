@@ -349,6 +349,10 @@ CREATE TABLE IF NOT EXISTS licenses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id INTEGER NOT NULL UNIQUE REFERENCES license_orders(id) ON DELETE RESTRICT,
     follow_up_of INTEGER REFERENCES licenses(id) ON DELETE RESTRICT,
+    follow_up_reminded_at TEXT,
+    invoice_automation_attempted_on TEXT,
+    invoice_automation_completed_at TEXT,
+    invoice_automation_error TEXT NOT NULL DEFAULT '',
     seat_limit INTEGER NOT NULL CHECK(seat_limit BETWEEN 1 AND 500),
     starts_on TEXT NOT NULL,
     ends_on TEXT NOT NULL,
@@ -379,6 +383,20 @@ CREATE TABLE IF NOT EXISTS license_history (
     from_status TEXT,
     to_status TEXT NOT NULL,
     changed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS license_cancellations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    license_id INTEGER NOT NULL UNIQUE REFERENCES licenses(id) ON DELETE CASCADE,
+    effective_on TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('monthly_full','annual_prorated')),
+    original_amount_cents INTEGER NOT NULL,
+    retained_amount_cents INTEGER NOT NULL,
+    credit_amount_cents INTEGER NOT NULL,
+    original_payment_status TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS invoice_settings (
@@ -515,6 +533,14 @@ class Database:
                 connection.execute("ALTER TABLE licenses ADD COLUMN archived_at TEXT")
             if "follow_up_of" not in license_columns:
                 connection.execute("ALTER TABLE licenses ADD COLUMN follow_up_of INTEGER REFERENCES licenses(id) ON DELETE RESTRICT")
+            if "follow_up_reminded_at" not in license_columns:
+                connection.execute("ALTER TABLE licenses ADD COLUMN follow_up_reminded_at TEXT")
+            if "invoice_automation_attempted_on" not in license_columns:
+                connection.execute("ALTER TABLE licenses ADD COLUMN invoice_automation_attempted_on TEXT")
+            if "invoice_automation_completed_at" not in license_columns:
+                connection.execute("ALTER TABLE licenses ADD COLUMN invoice_automation_completed_at TEXT")
+            if "invoice_automation_error" not in license_columns:
+                connection.execute("ALTER TABLE licenses ADD COLUMN invoice_automation_error TEXT NOT NULL DEFAULT ''")
             invoice_columns = {row[1] for row in connection.execute("PRAGMA table_info(invoices)").fetchall()}
             invoice_indexes = connection.execute("PRAGMA index_list(invoices)").fetchall()
             has_unique_license = False

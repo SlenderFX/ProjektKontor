@@ -14,6 +14,7 @@ import secrets
 import smtplib
 import sqlite3
 import sys
+import threading
 import traceback
 import unicodedata
 import warnings
@@ -119,7 +120,7 @@ def parse_date(value: Any, field: str) -> str:
 
 
 def standard_license_dates(kind: str) -> tuple[str, str]:
-    starts = datetime.now(timezone.utc).date()
+    starts = date.today()
     if kind == "beta":
         ends = starts + timedelta(days=13)
     elif kind == "monthly":
@@ -137,7 +138,7 @@ def standard_license_dates(kind: str) -> tuple[str, str]:
 
 
 def product_license_dates(product: dict[str, Any], starts: date | None = None) -> tuple[str, str]:
-    starts = starts or datetime.now(timezone.utc).date()
+    starts = starts or date.today()
     value = int(product["duration_value"])
     unit = product["duration_unit"]
     if unit == "days":
@@ -214,11 +215,13 @@ class App:
         route("PATCH", r"/api/license-requests/(?P<request_id>\d+)")(self.update_license_request)
         route("POST", r"/api/licenses")(self.create_license)
         route("PATCH", r"/api/licenses/(?P<license_id>\d+)")(self.update_license)
+        route("POST", r"/api/licenses/(?P<license_id>\d+)/courtesy-cancel")(self.courtesy_cancel_license)
         route("POST", r"/api/licenses/(?P<license_id>\d+)/archive")(self.archive_license)
         route("DELETE", r"/api/licenses/(?P<license_id>\d+)")(self.delete_license)
         route("GET", r"/api/invoice-settings")(self.get_invoice_settings)
         route("PATCH", r"/api/invoice-settings")(self.update_invoice_settings)
         route("POST", r"/api/licenses/(?P<license_id>\d+)/invoice")(self.create_invoice)
+        route("POST", r"/api/invoices/(?P<invoice_id>\d+)/paid")(self.mark_invoice_paid)
         route("POST", r"/api/invoices/(?P<invoice_id>\d+)/archive")(self.archive_invoice)
         route("POST", r"/api/invoices/(?P<invoice_id>\d+)/email")(self.email_invoice)
         route("GET", r"/api/invoices/(?P<invoice_id>\d+)")(self.download_invoice)
@@ -472,7 +475,7 @@ class App:
         return user, session
 
     def refresh_expired_licenses(self) -> None:
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = date.today().isoformat()
         expired = self.db.all("SELECT id FROM licenses WHERE status='active' AND ends_on<?", (today,))
         scheduled = self.db.all(
             "SELECT id FROM licenses WHERE status='draft' AND follow_up_of IS NOT NULL AND starts_on<=? AND ends_on>=?",
@@ -494,9 +497,94 @@ class App:
                         (status, now, *ids),
                     )
 
+    def run_license_automation(self) -> dict[str, int]:
+        today_date = date.today()
+        today = today_date.isoformat()
+        reminder_until = (today_date + timedelta(days=7)).isoformat()
+        now = utcnow()
+        reminded = self.db.all(
+            """SELECT id FROM licenses WHERE status='draft' AND follow_up_of IS NOT NULL
+                 AND archived_at IS NULL AND follow_up_reminded_at IS NULL
+                 AND starts_on>? AND starts_on<=?""",
+            (today, reminder_until),
+        )
+        if reminded:
+            ids = [row["id"] for row in reminded]
+            placeholders = ",".join("?" for _ in ids)
+            self.db.execute(
+                f"UPDATE licenses SET follow_up_reminded_at=?,updated_at=? WHERE id IN ({placeholders})",
+                (now, now, *ids),
+            )
+
+        self.refresh_expired_licenses()
+        self.db.execute(
+            """UPDATE license_orders SET payment_status='overdue',updated_at=?
+                 WHERE payment_status='open' AND id IN (
+                   SELECT l.order_id FROM licenses l JOIN invoices i ON i.license_id=l.id
+                    WHERE i.status='open' AND i.archived_at IS NULL AND i.due_on<?
+                 )""",
+            (now, today),
+        )
+        owner = self.db.one(
+            "SELECT * FROM users WHERE role='teacher' AND is_owner=1 AND active=1 ORDER BY id LIMIT 1"
+        )
+        candidates = self.db.all(
+            """SELECT id FROM licenses WHERE status='active' AND follow_up_of IS NOT NULL
+                 AND archived_at IS NULL AND starts_on<=? AND invoice_automation_completed_at IS NULL
+                 AND COALESCE(invoice_automation_attempted_on,'')<>? ORDER BY starts_on,id""",
+            (today, today),
+        )
+        created = failed = 0
+        for row in candidates:
+            license_id = row["id"]
+            with self.db.transaction() as connection:
+                claimed = connection.execute(
+                    """UPDATE licenses SET invoice_automation_attempted_on=?,invoice_automation_error='',updated_at=?
+                         WHERE id=? AND invoice_automation_completed_at IS NULL
+                           AND COALESCE(invoice_automation_attempted_on,'')<>?""",
+                    (today, now, license_id, today),
+                ).rowcount
+            if not claimed:
+                continue
+            existing = self.db.one(
+                """SELECT id FROM invoices WHERE license_id=? AND archived_at IS NULL
+                     AND status<>'cancelled' LIMIT 1""",
+                (license_id,),
+            )
+            if existing:
+                self.db.execute(
+                    "UPDATE licenses SET invoice_automation_completed_at=?,invoice_automation_error='' WHERE id=?",
+                    (now, license_id),
+                )
+                continue
+            if not owner:
+                error = "Die automatische Rechnung konnte nicht erstellt werden: Administratorkonto fehlt."
+                self.db.execute(
+                    "UPDATE licenses SET invoice_automation_error=? WHERE id=?", (error, license_id)
+                )
+                failed += 1
+                continue
+            payload = json_bytes({"confirm_zero_invoice": True})
+            environ = {"CONTENT_LENGTH": str(len(payload)), "wsgi.input": io.BytesIO(payload)}
+            try:
+                self.create_invoice(environ, owner, license_id)
+                self.db.execute(
+                    "UPDATE licenses SET invoice_automation_completed_at=?,invoice_automation_error='' WHERE id=?",
+                    (utcnow(), license_id),
+                )
+                created += 1
+            except Exception as exc:
+                message = exc.message if isinstance(exc, HttpError) else "Unerwarteter Fehler bei der Rechnungserstellung."
+                self.db.execute(
+                    "UPDATE licenses SET invoice_automation_error=? WHERE id=?",
+                    (f"Automatische Rechnung fehlgeschlagen: {message}"[:1000], license_id),
+                )
+                failed += 1
+        return {"reminded": len(reminded), "created": created, "failed": failed}
+
     def teacher_license_valid(self, teacher_id: int) -> bool:
         self.refresh_expired_licenses()
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = date.today().isoformat()
         return bool(self.db.one(
             """SELECT 1 ok FROM license_teachers lt
                JOIN licenses l ON l.id=lt.license_id
@@ -1006,7 +1094,9 @@ class App:
 
     def license_record(self, license_id: int) -> dict[str, Any] | None:
         record = self.db.one(
-            """SELECT l.id,l.order_id,l.follow_up_of,l.seat_limit,l.starts_on,l.ends_on,l.status,l.archived_at,
+            """SELECT l.id,l.order_id,l.follow_up_of,l.follow_up_reminded_at,
+                      l.invoice_automation_attempted_on,l.invoice_automation_completed_at,
+                      l.invoice_automation_error,l.seat_limit,l.starts_on,l.ends_on,l.status,l.archived_at,
                       l.created_at,l.updated_at,o.customer_name,o.organization,o.email,
                       o.billing_address,o.invoice_reference,o.plan,o.billing_cycle,o.amount_cents,
                       o.payment_status,o.notes
@@ -1030,6 +1120,9 @@ class App:
             (license_id,),
         )
         record["invoice"] = record["invoices"][0] if record["invoices"] else None
+        record["cancellation"] = self.db.one(
+            "SELECT * FROM license_cancellations WHERE license_id=?", (license_id,)
+        )
         record["history"] = self.db.all(
             """SELECT h.id,h.event_type,h.from_plan,h.to_plan,h.from_billing_cycle,
                       h.to_billing_cycle,h.from_amount_cents,h.to_amount_cents,
@@ -1042,7 +1135,7 @@ class App:
 
     def list_licenses(self, environ, user):
         self.require_owner(user)
-        self.refresh_expired_licenses()
+        self.run_license_automation()
         rows = self.db.all("SELECT id FROM licenses ORDER BY created_at DESC,id DESC")
         return [self.license_record(row["id"]) for row in rows]
 
@@ -1179,7 +1272,7 @@ class App:
             if amount_cents <= 0:
                 raise HttpError(400, "Eine Bezahl-Lizenz benötigt einen Preis größer als 0 Euro.")
             billing_cycle = "annual"
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = date.today().isoformat()
         if status == "active" and ends_on < today:
             status = "expired"
         raw_teacher_ids = data.get("teacher_ids")
@@ -1444,6 +1537,139 @@ class App:
             )
         return self.license_record(license_id)
 
+    @staticmethod
+    def add_months(value: date, months: int) -> date:
+        month_index = value.month - 1 + months
+        year = value.year + month_index // 12
+        month = month_index % 12 + 1
+        return date(year, month, min(value.day, calendar.monthrange(year, month)[1]))
+
+    @classmethod
+    def completed_contract_months(cls, starts_on: date, ends_on: date, effective_on: date) -> tuple[int, int]:
+        contract_end_exclusive = ends_on + timedelta(days=1)
+        effective_end_exclusive = min(effective_on, ends_on) + timedelta(days=1)
+        total = used = 0
+        while cls.add_months(starts_on, total + 1) <= contract_end_exclusive:
+            total += 1
+        while cls.add_months(starts_on, used + 1) <= effective_end_exclusive:
+            used += 1
+        return used, max(total, 1)
+
+    def courtesy_cancel_license(self, environ, user, license_id):
+        owner = self.require_owner(user)
+        current = self.license_record(license_id)
+        if not current:
+            raise HttpError(404, "Lizenz nicht gefunden.")
+        if current["plan"] == "beta" or int(current["amount_cents"]) == 0:
+            raise HttpError(409, "Ein kostenfreier Testzugang benötigt keine Kulanzstornierung.")
+        if current["status"] != "active" or current.get("archived_at"):
+            raise HttpError(409, "Nur eine aktive Bezahl-Lizenz kann aus Kulanz beendet werden.")
+        if current.get("cancellation"):
+            raise HttpError(409, "Für diese Lizenz wurde bereits eine Kulanzbeendigung erfasst.")
+        data = self.body(environ)
+        if data.get("confirm_courtesy_cancellation") is not True:
+            raise HttpError(400, "Bestätigen Sie die Kulanzbeendigung ausdrücklich.")
+        try:
+            effective_on = date.fromisoformat(str(data.get("effective_on", "")))
+        except ValueError as exc:
+            raise HttpError(400, "Der Stichtag ist ungültig.") from exc
+        starts_on, ends_on = date.fromisoformat(current["starts_on"]), date.fromisoformat(current["ends_on"])
+        if effective_on < starts_on or effective_on > date.today():
+            raise HttpError(400, "Der Stichtag muss innerhalb der bisherigen Laufzeit und darf nicht in der Zukunft liegen.")
+
+        monthly = current["billing_cycle"] == "monthly"
+        used_months, total_months = self.completed_contract_months(starts_on, ends_on, effective_on)
+        retained = 0 if monthly else round(int(current["amount_cents"]) * used_months / total_months)
+        credit = int(current["amount_cents"]) - retained
+        corrected_end = effective_on if monthly or used_months == 0 else self.add_months(starts_on, used_months) - timedelta(days=1)
+        notes = str(data.get("notes", "")).strip()[:1000]
+        now = utcnow()
+        invoice_states = [dict(row) for row in self.db.all(
+            """SELECT i.id,i.status,i.archived_at,r.retired_at
+                 FROM invoices i LEFT JOIN invoice_number_registry r ON r.invoice_id=i.id
+                WHERE i.license_id=?""", (license_id,)
+        )]
+        original_paid = any(row["status"] == "paid" and not row["archived_at"] for row in invoice_states)
+
+        with self.db.transaction() as connection:
+            connection.execute(
+                "UPDATE invoices SET status='cancelled',archived_at=COALESCE(archived_at,?) WHERE license_id=?",
+                (now, license_id),
+            )
+            connection.execute(
+                "UPDATE invoice_number_registry SET retired_at=COALESCE(retired_at,?) WHERE invoice_id IN (SELECT id FROM invoices WHERE license_id=?)",
+                (now, license_id),
+            )
+            connection.execute(
+                "UPDATE license_orders SET amount_cents=?,payment_status=?,updated_at=? WHERE id=?",
+                (retained, "refunded" if original_paid and retained == 0 else "cancelled", now, current["order_id"]),
+            )
+            connection.execute(
+                "UPDATE licenses SET ends_on=?,status='cancelled',updated_at=? WHERE id=?",
+                (corrected_end.isoformat(), now, license_id),
+            )
+            connection.execute(
+                """INSERT INTO license_cancellations(
+                       license_id,effective_on,mode,original_amount_cents,retained_amount_cents,
+                       credit_amount_cents,original_payment_status,notes,created_by,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    license_id, effective_on.isoformat(), "monthly_full" if monthly else "annual_prorated",
+                    current["amount_cents"], retained, credit, current["payment_status"], notes,
+                    owner["id"], now,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO license_history(
+                       license_id,changed_by,event_type,from_plan,to_plan,from_billing_cycle,
+                       to_billing_cycle,from_amount_cents,to_amount_cents,from_status,to_status,changed_at
+                   ) VALUES(?,?,'updated',?,?,?,?,?,?,?,?,?)""",
+                (
+                    license_id, owner["id"], current["plan"], current["plan"], current["billing_cycle"],
+                    current["billing_cycle"], current["amount_cents"], retained, current["status"],
+                    "cancelled", now,
+                ),
+            )
+
+        corrected_invoice = None
+        if retained > 0:
+            payload = json_bytes({"confirm_zero_invoice": False})
+            invoice_environ = {"CONTENT_LENGTH": str(len(payload)), "wsgi.input": io.BytesIO(payload)}
+            try:
+                corrected_invoice = self.create_invoice(invoice_environ, owner, license_id)
+                if original_paid:
+                    with self.db.transaction() as connection:
+                        connection.execute("UPDATE invoices SET status='paid' WHERE id=?", (corrected_invoice["id"],))
+                        self.sync_license_payment_status(connection, license_id)
+            except Exception:
+                with self.db.transaction() as connection:
+                    connection.execute("DELETE FROM license_cancellations WHERE license_id=?", (license_id,))
+                    connection.execute(
+                        "DELETE FROM license_history WHERE license_id=? AND changed_at=?", (license_id, now)
+                    )
+                    connection.execute(
+                        "UPDATE licenses SET ends_on=?,status=?,updated_at=? WHERE id=?",
+                        (current["ends_on"], current["status"], current["updated_at"], license_id),
+                    )
+                    connection.execute(
+                        "UPDATE license_orders SET amount_cents=?,payment_status=?,updated_at=? WHERE id=?",
+                        (current["amount_cents"], current["payment_status"], current["updated_at"], current["order_id"]),
+                    )
+                    for state in invoice_states:
+                        connection.execute(
+                            "UPDATE invoices SET status=?,archived_at=? WHERE id=?",
+                            (state["status"], state["archived_at"], state["id"]),
+                        )
+                        connection.execute(
+                            "UPDATE invoice_number_registry SET retired_at=? WHERE invoice_id=?",
+                            (state["retired_at"], state["id"]),
+                        )
+                raise
+        result = self.license_record(license_id)
+        result["corrected_invoice"] = corrected_invoice
+        result["refund_due_cents"] = credit if original_paid else 0
+        return result
+
     def archive_license(self, environ, user, license_id):
         owner = self.require_owner(user)
         current = self.license_record(license_id)
@@ -1483,6 +1709,14 @@ class App:
         current = self.license_record(license_id)
         if not current:
             raise HttpError(404, "Lizenz nicht gefunden.")
+        dependent = self.db.one(
+            "SELECT id FROM licenses WHERE follow_up_of=? ORDER BY id LIMIT 1", (license_id,)
+        )
+        if dependent:
+            raise HttpError(
+                409,
+                "Für diese Lizenz besteht noch eine Folgelizenz. Löschen Sie zuerst die Vormerkung.",
+            )
         invoice_files = [self.config.report_dir / invoice["stored_name"] for invoice in current["invoices"]]
         teacher_ids = [teacher["id"] for teacher in current["teachers"]]
         with self.db.transaction() as connection:
@@ -1566,6 +1800,13 @@ class App:
 
     @staticmethod
     def invoice_description(license_record: dict[str, Any]) -> str:
+        if license_record.get("cancellation"):
+            cancellation = license_record["cancellation"]
+            return (
+                "Korrigierte ProjektKontor-Lizenz nach Kulanzbeendigung – "
+                f"berechnet werden {cancellation['retained_amount_cents'] / 100:.2f} EUR "
+                "für vollständig genutzte Vertragsmonate"
+            )
         if license_record["plan"] == "beta":
             return "ProjektKontor Beta-Testzugang - kostenfreie Testlizenz"
         if license_record["plan"] == "single":
@@ -1593,7 +1834,7 @@ class App:
         settings = self.db.one("SELECT * FROM invoice_settings WHERE id=1")
         if not settings or not settings["business_name"] or not settings["address"] or not settings["tax_identifier"]:
             raise HttpError(400, "Vervollständigen Sie zunächst die Angaben zum Rechnungssteller.")
-        issued = datetime.now(timezone.utc).date()
+        issued = date.today()
         gross_cents = int(license_record["amount_cents"])
         now = utcnow()
         stored_name = ""
@@ -1684,6 +1925,11 @@ class App:
                     "UPDATE license_orders SET payment_status='not_required',updated_at=? WHERE id=?",
                     (now, license_record["order_id"]),
                 )
+            else:
+                connection.execute(
+                    "UPDATE license_orders SET payment_status='open',updated_at=? WHERE id=?",
+                    (now, license_record["order_id"]),
+                )
             invoice_id = int(cursor.lastrowid)
             connection.execute(
                 """INSERT INTO invoice_number_registry(invoice_number,invoice_id,reserved_at,retired_at)
@@ -1695,6 +1941,47 @@ class App:
                       emailed_at,downloaded_at,archived_at,created_at FROM invoices WHERE id=?""",
             (invoice_id,),
         )
+
+    def sync_license_payment_status(self, connection: sqlite3.Connection, license_id: int) -> str:
+        license_row = connection.execute(
+            """SELECT l.order_id,o.amount_cents FROM licenses l JOIN license_orders o ON o.id=l.order_id
+                 WHERE l.id=?""",
+            (license_id,),
+        ).fetchone()
+        if not license_row:
+            return "cancelled"
+        invoices = connection.execute(
+            "SELECT status,due_on FROM invoices WHERE license_id=? AND archived_at IS NULL",
+            (license_id,),
+        ).fetchall()
+        if int(license_row["amount_cents"]) == 0:
+            status = "not_required"
+        elif any(invoice["status"] == "paid" for invoice in invoices):
+            status = "paid"
+        elif any(invoice["status"] == "open" for invoice in invoices):
+            today = date.today().isoformat()
+            status = "overdue" if any(
+                invoice["status"] == "open" and invoice["due_on"] < today for invoice in invoices
+            ) else "open"
+        else:
+            status = "cancelled"
+        connection.execute(
+            "UPDATE license_orders SET payment_status=?,updated_at=? WHERE id=?",
+            (status, utcnow(), license_row["order_id"]),
+        )
+        return status
+
+    def mark_invoice_paid(self, environ, user, invoice_id):
+        self.require_owner(user)
+        invoice = self.db.one("SELECT * FROM invoices WHERE id=?", (invoice_id,))
+        if not invoice:
+            raise HttpError(404, "Rechnung nicht gefunden.")
+        if invoice.get("archived_at") or invoice["status"] == "cancelled":
+            raise HttpError(409, "Eine stornierte Rechnung kann nicht als bezahlt markiert werden.")
+        with self.db.transaction() as connection:
+            connection.execute("UPDATE invoices SET status='paid' WHERE id=?", (invoice_id,))
+            self.sync_license_payment_status(connection, invoice["license_id"])
+        return self.db.one("SELECT * FROM invoices WHERE id=?", (invoice_id,))
 
     def archive_invoice(self, environ, user, invoice_id):
         self.require_owner(user)
@@ -1719,6 +2006,7 @@ class App:
                 "UPDATE invoice_number_registry SET retired_at=COALESCE(retired_at,?) WHERE invoice_number=?",
                 (now, invoice["invoice_number"]),
             )
+            self.sync_license_payment_status(connection, invoice["license_id"])
         return self.db.one("SELECT * FROM invoices WHERE id=?", (invoice_id,))
 
     def delete_invoice(self, environ, user, invoice_id):
@@ -1742,6 +2030,7 @@ class App:
                 (now, invoice["invoice_number"]),
             )
             connection.execute("DELETE FROM invoices WHERE id=?", (invoice_id,))
+            self.sync_license_payment_status(connection, invoice["license_id"])
         try:
             (self.config.report_dir / invoice["stored_name"]).unlink(missing_ok=True)
         except OSError:
@@ -3086,9 +3375,24 @@ def create_application() -> App:
 def main() -> None:
     config = load_config()
     app = App(config)
+    stop_automation = threading.Event()
+    def automation_worker() -> None:
+        while not stop_automation.is_set():
+            try:
+                app.run_license_automation()
+            except Exception:
+                traceback.print_exc()
+            stop_automation.wait(60 * 60)
+    automation_thread = threading.Thread(
+        target=automation_worker, name="projektkontor-license-automation", daemon=True
+    )
+    automation_thread.start()
     print(f"ProjektKontor läuft unter http://{config.host}:{config.port}")
     try:
         with make_server(config.host, config.port, app) as server:
             server.serve_forever()
     except KeyboardInterrupt:
         print("\nProjektKontor wurde beendet.")
+    finally:
+        stop_automation.set()
+        automation_thread.join(timeout=2)

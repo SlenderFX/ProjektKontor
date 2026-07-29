@@ -1063,6 +1063,175 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(self.app.license_record(follow_up["id"])["status"], "active")
         self.assertTrue(self.app.teacher_license_valid(teacher["id"]))
 
+    def test_follow_up_reminder_activation_and_invoice_are_automatic_and_idempotent(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        settings = self.app.db.one("SELECT * FROM invoice_settings WHERE id=1")
+        admin.request("PATCH", "/api/invoice-settings", {
+            **settings, "iban": "DE02120300000000202051",
+            "bic": "BYLADEM1001", "bank_name": "Beispielbank",
+        })
+        today = date.today()
+        _, source, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Automatik", "organization": "Automatik-BK",
+            "email": "rechnung@example.org", "billing_address": "Testweg 1\n45127 Essen",
+            "plan": "single", "billing_cycle": "annual", "amount_cents": 7900,
+            "seat_limit": 1, "payment_status": "paid", "status": "active",
+            "starts_on": (today - timedelta(days=360)).isoformat(),
+            "ends_on": (today + timedelta(days=5)).isoformat(), "teacher_ids": [],
+        })
+        _, follow_up, _ = admin.request("POST", "/api/licenses", {
+            "follow_up_of": source["id"], "customer_name": "Automatik",
+            "organization": "Automatik-BK", "email": "rechnung@example.org",
+            "billing_address": "Testweg 1\n45127 Essen", "plan": "single",
+            "billing_cycle": "annual", "amount_cents": 8900, "seat_limit": 1,
+            "starts_on": (today + timedelta(days=6)).isoformat(),
+            "ends_on": (today + timedelta(days=370)).isoformat(), "teacher_ids": [],
+        })
+        result = self.app.run_license_automation()
+        self.assertEqual(result["reminded"], 1)
+        self.assertTrue(self.app.license_record(follow_up["id"])["follow_up_reminded_at"])
+
+        self.app.db.execute(
+            "UPDATE licenses SET ends_on=? WHERE id=?",
+            ((today - timedelta(days=1)).isoformat(), source["id"]),
+        )
+        self.app.db.execute(
+            "UPDATE licenses SET starts_on=? WHERE id=?", (today.isoformat(), follow_up["id"])
+        )
+        first = self.app.run_license_automation()
+        second = self.app.run_license_automation()
+        activated = self.app.license_record(follow_up["id"])
+        self.assertEqual(first["created"], 1)
+        self.assertEqual(second["created"], 0)
+        self.assertEqual(activated["status"], "active")
+        self.assertEqual(len(activated["invoices"]), 1)
+        self.assertTrue(activated["invoice_automation_completed_at"])
+
+    def test_invoice_paid_action_syncs_license_payment_status(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        settings = self.app.db.one("SELECT * FROM invoice_settings WHERE id=1")
+        admin.request("PATCH", "/api/invoice-settings", {
+            **settings, "iban": "DE02120300000000202051",
+        })
+        _, license_record, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Zahlstatus", "billing_address": "Testweg 1\n45127 Essen",
+            "plan": "single", "billing_cycle": "annual", "amount_cents": 7900,
+            "seat_limit": 1, "payment_status": "open", "status": "active",
+            "starts_on": date.today().isoformat(),
+            "ends_on": (date.today() + timedelta(days=364)).isoformat(), "teacher_ids": [],
+        })
+        status, invoice, _ = admin.request(
+            "POST", f"/api/licenses/{license_record['id']}/invoice", {}
+        )
+        self.assertEqual(status, 200)
+        status, paid, _ = admin.request("POST", f"/api/invoices/{invoice['id']}/paid", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(paid["status"], "paid")
+        self.assertEqual(self.app.license_record(license_record["id"])["payment_status"], "paid")
+
+    def test_source_license_cannot_be_deleted_before_its_follow_up(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        today = date.today()
+        _, source, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Vormerkung", "plan": "single", "billing_cycle": "annual",
+            "amount_cents": 7900, "seat_limit": 1, "payment_status": "paid", "status": "active",
+            "starts_on": today.isoformat(), "ends_on": (today + timedelta(days=30)).isoformat(),
+            "teacher_ids": [],
+        })
+        _, follow_up, _ = admin.request("POST", "/api/licenses", {
+            "follow_up_of": source["id"], "customer_name": "Vormerkung", "plan": "school",
+            "billing_cycle": "annual", "amount_cents": 59900, "seat_limit": 15,
+            "starts_on": (today + timedelta(days=31)).isoformat(),
+            "ends_on": (today + timedelta(days=395)).isoformat(), "teacher_ids": [],
+        })
+        status, error, _ = admin.request(
+            "DELETE", f"/api/licenses/{source['id']}", {"confirm_permanent_delete": True}
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("Vormerkung", error["error"])
+        status, _, _ = admin.request(
+            "DELETE", f"/api/licenses/{follow_up['id']}", {"confirm_permanent_delete": True}
+        )
+        self.assertEqual(status, 200)
+        status, _, _ = admin.request(
+            "DELETE", f"/api/licenses/{source['id']}", {"confirm_permanent_delete": True}
+        )
+        self.assertEqual(status, 200)
+
+    def test_monthly_courtesy_cancellation_fully_cancels_invoice(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        settings = self.app.db.one("SELECT * FROM invoice_settings WHERE id=1")
+        admin.request("PATCH", "/api/invoice-settings", {**settings, "iban": "DE02120300000000202051"})
+        today = date.today()
+        _, license_record, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Monatskulanz", "billing_address": "Testweg 1\n45127 Essen",
+            "plan": "single", "billing_cycle": "monthly", "amount_cents": 890,
+            "seat_limit": 1, "payment_status": "open", "status": "active",
+            "starts_on": today.isoformat(),
+            "ends_on": (self.app.add_months(today, 1) - timedelta(days=1)).isoformat(),
+            "teacher_ids": [],
+        })
+        _, invoice, _ = admin.request("POST", f"/api/licenses/{license_record['id']}/invoice", {})
+        admin.request("POST", f"/api/invoices/{invoice['id']}/paid", {})
+        status, cancelled, _ = admin.request(
+            "POST", f"/api/licenses/{license_record['id']}/courtesy-cancel", {
+                "effective_on": today.isoformat(), "notes": "Kulanzfall",
+                "confirm_courtesy_cancellation": True,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["amount_cents"], 0)
+        self.assertEqual(cancelled["payment_status"], "refunded")
+        self.assertEqual(cancelled["refund_due_cents"], 890)
+        self.assertEqual(cancelled["cancellation"]["mode"], "monthly_full")
+        self.assertTrue(cancelled["invoices"][0]["archived_at"])
+
+    def test_annual_courtesy_cancellation_keeps_only_completed_months(self):
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        settings = self.app.db.one("SELECT * FROM invoice_settings WHERE id=1")
+        admin.request("PATCH", "/api/invoice-settings", {**settings, "iban": "DE02120300000000202051"})
+        today = date.today()
+        start = self.app.add_months(today, -6)
+        end = self.app.add_months(start, 12) - timedelta(days=1)
+        _, license_record, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Jahreskulanz", "billing_address": "Testweg 1\n45127 Essen",
+            "plan": "single", "billing_cycle": "annual", "amount_cents": 12000,
+            "seat_limit": 1, "payment_status": "open", "status": "active",
+            "starts_on": start.isoformat(), "ends_on": end.isoformat(), "teacher_ids": [],
+        })
+        _, original, _ = admin.request("POST", f"/api/licenses/{license_record['id']}/invoice", {})
+        admin.request("POST", f"/api/invoices/{original['id']}/paid", {})
+        status, cancelled, _ = admin.request(
+            "POST", f"/api/licenses/{license_record['id']}/courtesy-cancel", {
+                "effective_on": today.isoformat(), "confirm_courtesy_cancellation": True,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["amount_cents"], 6000)
+        self.assertEqual(cancelled["cancellation"]["retained_amount_cents"], 6000)
+        self.assertEqual(cancelled["refund_due_cents"], 6000)
+        active_invoices = [row for row in cancelled["invoices"] if not row["archived_at"]]
+        self.assertEqual(len(active_invoices), 1)
+        self.assertEqual(active_invoices[0]["gross_cents"], 6000)
+        self.assertEqual(active_invoices[0]["status"], "paid")
+
     def test_assigning_a_teacher_to_another_license_transfers_the_assignment(self):
         admin = Client(self.app)
         admin.request("POST", "/api/setup", {
