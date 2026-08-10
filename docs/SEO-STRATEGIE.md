@@ -93,14 +93,14 @@ größeren Marktstart sollten eigenständige, indexierbare Seiten folgen:
 4. `/kanban-im-unterricht` – didaktisch begründete Anwendung,
 5. `/datenschutz-und-betrieb` – Hosting, Rollen und Datenkontrolle,
 6. `/funktionen` – überprüfbare Funktionsübersicht,
-7. `/impressum` und `/datenschutz` – rechtlich freigegebene öffentliche Seiten.
+7. `/impressum` und `/datenschutz` – öffentliche Anbieter- und Datenschutzinformationen (umgesetzt; die schulbezogenen Angaben bleiben installationsabhängig).
 
 Jede Seite benötigt eine eigene Suchintention und darf nicht lediglich Text
 des Onepagers wiederholen.
 
 ## Vor dem Marktstart
 
-- Betreiber, Impressum, Datenschutzkontakt und Rechtsgrundlage finalisieren.
+- Die öffentliche Datenschutzerklärung bei Änderungen an Dienstleistern oder Funktionen aktualisieren; Datenschutzkontakt und Rechtsgrundlage der jeweiligen Schule vor deren Produktivbetrieb finalisieren.
 - Kontaktformular nach Einrichtung von SMTP und Turnstile mit einer echten Anfrage prüfen.
 - Google Search Console und Bing Webmaster Tools einrichten.
 - Sitemap einreichen und kanonische Domain prüfen.

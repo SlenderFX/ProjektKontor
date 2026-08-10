@@ -327,6 +327,8 @@ class App:
             relative = "index.html"
         elif path.rstrip("/") == "/impressum":
             relative = "impressum.html"
+        elif path.rstrip("/") == "/datenschutz":
+            relative = "datenschutz.html"
         else:
             relative = path.lstrip("/")
         target = (STATIC_DIR / relative).resolve()
