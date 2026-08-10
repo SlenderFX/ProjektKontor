@@ -1,6 +1,18 @@
 # SEO-Vorbereitung für ProjektKontor
 
-Stand: 16. Juli 2026 – Vorbereitung, noch kein Marktstart
+Stand: 10. August 2026 – organische Markteinführung ohne bezahlte Anzeigen
+
+## Ziel: qualifizierte organische Nachfrage
+
+ProjektKontor soll Interessierte über hilfreiche Suchergebnisse, fachliche
+Empfehlungen und direkte Verweise erreichen. Bezahlte Such- oder Social-Anzeigen
+sind nicht Bestandteil der Markteinführung. SEO wird dabei nicht als Ersatz für
+ein gutes Produktversprechen verstanden, sondern macht fachlich hilfreiche und
+glaubwürdige Inhalte auffindbar.
+
+Eine Platzierung kann nicht garantiert werden. Die Strategie reduziert die
+Abhängigkeit von Anzeigen durch einen klaren Themenschwerpunkt, eigene fachliche
+Inhalte, saubere Indexierung und kontinuierliche Auswertung in der Search Console.
 
 ## Positionierung
 
@@ -14,6 +26,13 @@ Zentrale Aussage:
 > Berufliche Handlungssituationen vollständig durchlaufen.
 
 ## Suchintentionen und Themenfelder
+
+Die Ansprache folgt zwei unterschiedlichen Wegen: Lehrkräfte suchen nach einer
+Lösung für ein konkretes Unterrichtsproblem; Fachbereichs- und
+Bildungsgangleitungen, Schulleitungen sowie gegebenenfalls Schulträger benötigen
+zusätzlich belastbare Informationen zu gemeinsamer Nutzung, Einführung,
+Datenschutz und Kosten. Organische Inhalte müssen beide Wege abdecken, ohne
+dieselbe Seite für jede Zielgruppe zu vervielfältigen.
 
 Priorität A – präzise Produkt- und Problembegriffe:
 
@@ -55,9 +74,13 @@ keine künstlichen Wiederholungen oder austauschbare SEO-Texte angelegt.
   zusätzlich einen `X-Robots-Tag` mit `noindex`.
 - `robots.txt` sperrt `/api/`, lässt die öffentliche Produktseite erreichbar
   und verweist auf die XML-Sitemap.
-- Die Sitemap enthält aktuell ausschließlich die öffentliche Startseite.
+- Die Sitemap enthält die öffentliche Startseite und das vollständige Impressum.
 - Titel, Beschreibung, Open-Graph-Daten und strukturierte Angaben zu Website
-  und Software sind vorbereitet.
+  und Software sind auf die zentrale Suchintention abgestimmt.
+- Die Startseite beantwortet sichtbare, konkrete Fragen von Lehrkräften. Diese
+  Inhalte dienen Menschen und werden nicht als unsichtbarer SEO-Text angelegt.
+- Das vollständige Impressum ist indexierbar und stärkt die überprüfbare
+  Anbietertransparenz; Login und interne Bereiche bleiben ausgeschlossen.
 
 ## Inhaltliche Architektur zum Start
 
@@ -98,6 +121,25 @@ Zum Start genügen datensparsame Kennzahlen:
 
 Loginbereich, interne Nutzung, Klassen-, Personen- und Projektdaten werden
 nicht für Marketingmessung verwendet.
+
+## Organischer Veröffentlichungsrhythmus
+
+Die nächsten Fachseiten werden nicht gleichzeitig als dünne Landingpages
+veröffentlicht. Sinnvoll ist zunächst ein belastbarer Beitrag pro Monat, der
+eine echte Frage aus Unterricht oder Einführung vollständig beantwortet.
+
+1. Eine fachliche Hauptseite veröffentlichen und intern von der Startseite verlinken.
+2. Indexierung und tatsächliche Suchanfragen in der Search Console beobachten.
+3. Inhalte anhand echter Rückfragen von Lehrkräften ergänzen.
+4. Erst nach eigenen Einsätzen Fallbeispiele mit nachvollziehbarem Kontext ergänzen.
+5. Quartalsweise Titel, Klickrate, Indexierung und qualifizierte Anfragen prüfen.
+
+Reichweite außerhalb von Suchmaschinen entsteht ergänzend durch fachliche
+Beiträge, Fortbildungen, Fachbereichsnetzwerke und Empfehlungen. Der kostenfreie
+Test senkt die Einstiegshürde für Lehrkräfte; Fachbereichs- und Schullizenzen
+verlagern die spätere Kaufentscheidung dorthin, wo Budgets gebündelt werden
+können. Alle Verweise führen auf dieselben hilfreichen Inhalte; es werden keine
+separaten Werbe-Landingpages benötigt.
 
 ## Referenzen zur technischen Umsetzung
 
