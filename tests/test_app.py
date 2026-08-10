@@ -937,6 +937,75 @@ class AppFlowTest(unittest.TestCase):
         self.assertNotEqual(third["invoice_number"], second["invoice_number"])
         self.assertTrue(third["invoice_number"].endswith("0003"))
 
+    def test_four_week_pilot_limits_class_and_active_project_until_conversion(self):
+        today = date.today()
+        product = self.app.db.one(
+            "SELECT name,duration_unit,duration_value FROM license_products WHERE product_key='beta'"
+        )
+        self.assertEqual(product["name"], "Vierwöchiger Praxistest")
+        self.assertEqual(product["duration_unit"], "days")
+        self.assertEqual(product["duration_value"], 28)
+
+        admin = Client(self.app)
+        admin.request("POST", "/api/setup", {
+            "first_name": "Admin", "username": "verwaltung", "password": "sicheres-admin-kennwort"
+        })
+        status, teacher, _ = admin.request("POST", "/api/teachers", {
+            "first_name": "Pilotlehrkraft", "username": "lehrkraft_pilot"
+        })
+        self.assertEqual(status, 200)
+        status, pilot, _ = admin.request("POST", "/api/licenses", {
+            "customer_name": "Pilotlehrkraft", "organization": "Pilot-BK",
+            "plan": "beta", "amount_cents": 0, "seat_limit": 1,
+            "payment_status": "not_required", "status": "active",
+            "starts_on": today.isoformat(), "ends_on": (today + timedelta(days=27)).isoformat(),
+            "teacher_ids": [teacher["id"]],
+        })
+        self.assertEqual(status, 200)
+
+        teacher_client = Client(self.app)
+        status, _, _ = teacher_client.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "lehrkraft_pilot",
+            "password": teacher["initial_password"],
+        })
+        self.assertEqual(status, 200)
+        status, first_class, _ = teacher_client.request("POST", "/api/classes", {"name": "PILOT1"})
+        self.assertEqual(status, 200)
+        status, denied_class, _ = teacher_client.request("POST", "/api/classes", {"name": "PILOT2"})
+        self.assertEqual(status, 409)
+        self.assertIn("auf eine Klasse begrenzt", denied_class["error"])
+
+        project_payload = {
+            "title": "Pilotprojekt", "class_id": first_class["id"],
+            "description": "Praxistest im Unterricht", "project_lead_id": teacher["id"],
+            "member_ids": [teacher["id"]], "has_start": False, "has_end": False,
+        }
+        status, _, _ = teacher_client.request("POST", "/api/projects", project_payload)
+        self.assertEqual(status, 200)
+        status, denied_project, _ = teacher_client.request(
+            "POST", "/api/projects", {**project_payload, "title": "Zweites Pilotprojekt"}
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("ein aktives Projekt", denied_project["error"])
+
+        status, paid, _ = admin.request("PATCH", f"/api/licenses/{pilot['id']}", {
+            "plan": "single", "billing_cycle": "annual", "amount_cents": 7900,
+            "payment_status": "open", "status": "active",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(paid["history"][0]["event_type"], "converted")
+        status, _, _ = teacher_client.request("POST", "/api/login", {
+            "login_type": "teacher", "username": "lehrkraft_pilot",
+            "password": TEST_TEACHER_PASSWORD,
+        })
+        self.assertEqual(status, 200)
+        status, _, _ = teacher_client.request("POST", "/api/classes", {"name": "PILOT2"})
+        self.assertEqual(status, 200)
+        status, _, _ = teacher_client.request(
+            "POST", "/api/projects", {**project_payload, "title": "Projekt nach Umwandlung"}
+        )
+        self.assertEqual(status, 200)
+
     def test_beta_invoice_conversion_history_and_payment_terms(self):
         admin = Client(self.app)
         admin.request("POST", "/api/setup", {
@@ -1412,9 +1481,12 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"299 \xe2\x82\xac", landing)
         self.assertIn(b"ab 599 \xe2\x82\xac", landing)
         self.assertIn(b'id="beta-dialog"', landing)
-        self.assertIn(b"begrenzte Anzahl kostenfreier Beta-Testzug\xc3\xa4nge", landing)
-        self.assertIn(b"14 Tage kostenfrei testen", landing)
-        self.assertIn(b"f\xc3\xbcr 14 Tage", landing)
+        self.assertIn(b"begrenzte Anzahl kostenfreier Pilotzug\xc3\xa4nge", landing)
+        self.assertIn(b"Vier Wochen kostenfrei erproben", landing)
+        self.assertIn(b"f\xc3\xbcr 4 Wochen", landing)
+        self.assertIn(b"Eine Lehrkraft und eine Klasse", landing)
+        self.assertIn(b"Ein aktives Unterrichtsprojekt", landing)
+        self.assertIn(b'id="pilot-qualification"', landing)
         self.assertNotIn(b"6\xe2\x80\x938 Wochen", landing)
         self.assertEqual(landing.count(b"Keine automatische Verl\xc3\xa4ngerung"), 1)
         self.assertIn(b"Nachhaltige Sch\xc3\xbclerfirma", landing)
@@ -1422,7 +1494,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"VPS in Deutschland", landing)
         self.assertIn(b"Grunds\xc3\xa4tze der DSGVO", landing)
         self.assertIn(b'href="#sicherheit">Datenschutz</a>', landing)
-        self.assertIn(b"Testzugang f\xc3\xbcr ProjektKontor anfragen", landing)
+        self.assertIn(b"Pilotzugang f\xc3\xbcr ProjektKontor anfragen", landing)
         self.assertIn(b"R\xc3\xbcckspr\xc3\xbcnge und \xc3\x9cberarbeitungen", landing)
         self.assertIn(b'class="process-lines"', landing)
         self.assertIn(b"L\xc3\xa4ngerfristiger<br>Unterrichtszusammenhang", landing)
@@ -1496,14 +1568,17 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b"projektkontor-beta-popup-dismissed-v2", landing_script)
         self.assertEqual(landing_script.count(b"rememberBetaPopup();"), 1)
         self.assertIn(b"15000", landing_script)
-        self.assertIn(b"Kostenloser Beta-Testzugang", landing_script)
+        self.assertIn(b"Vierw\xc3\xb6chiger ProjektKontor-Pilot", landing_script)
         self.assertIn(b"scrollPosition", landing_script)
         self.assertIn(b"previousScrollBehavior", landing_script)
 
     def test_contact_form_is_human_checked_and_recipient_stays_server_side(self):
         payload = {
-            "name": "Erika Beispiel", "email": "erika@example.org", "subject": "Testzugang",
+            "name": "Erika Beispiel", "email": "erika@example.org",
+            "subject": "Vierwöchiger ProjektKontor-Pilot",
             "message": "Ich möchte ProjektKontor gerne kennenlernen.", "privacy_accepted": True,
+            "organization": "Berufskolleg Beispiel", "pilot_start": "2026-09-01",
+            "usage_outlook": "recurring",
             "turnstile_token": "verified-token", "website": "",
         }
         with patch.object(self.app, "_verify_turnstile") as verify, patch.object(self.app, "_send_contact_email") as send:
@@ -1511,10 +1586,19 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(result["ok"])
         verify.assert_called_once_with("verified-token", "unknown")
-        send.assert_called_once_with("Erika Beispiel", "erika@example.org", "Testzugang", "Ich möchte ProjektKontor gerne kennenlernen.")
+        send.assert_called_once_with(
+            "Erika Beispiel", "erika@example.org", "Vierwöchiger ProjektKontor-Pilot",
+            "Ich möchte ProjektKontor gerne kennenlernen.\n\n"
+            "Schule / Organisation: Berufskolleg Beispiel\n"
+            "Geplanter Start: 2026-09-01\n"
+            "Geplante weitere Nutzung: Mehrere Vorhaben pro Schuljahr",
+        )
         saved = self.app.db.one("SELECT * FROM license_requests")
         self.assertEqual(saved["name"], "Erika Beispiel")
         self.assertEqual(saved["request_type"], "beta")
+        self.assertEqual(saved["organization"], "Berufskolleg Beispiel")
+        self.assertEqual(saved["pilot_start"], "2026-09-01")
+        self.assertEqual(saved["usage_outlook"], "recurring")
         self.assertEqual(saved["status"], "new")
         self.assertEqual(saved["email_status"], "sent")
 

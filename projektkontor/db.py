@@ -277,6 +277,9 @@ CREATE TABLE IF NOT EXISTS license_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     email TEXT NOT NULL,
+    organization TEXT NOT NULL DEFAULT '',
+    pilot_start TEXT NOT NULL DEFAULT '',
+    usage_outlook TEXT NOT NULL DEFAULT '',
     subject TEXT NOT NULL,
     message TEXT NOT NULL,
     request_type TEXT NOT NULL DEFAULT 'contact' CHECK(request_type IN ('beta','license','contact')),
@@ -521,6 +524,13 @@ class Database:
                 connection.execute("ALTER TABLE users ADD COLUMN initial_credentials_emailed_at TEXT")
             if "archived_at" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN archived_at TEXT")
+            request_columns = {row[1] for row in connection.execute("PRAGMA table_info(license_requests)").fetchall()}
+            if "organization" not in request_columns:
+                connection.execute("ALTER TABLE license_requests ADD COLUMN organization TEXT NOT NULL DEFAULT ''")
+            if "pilot_start" not in request_columns:
+                connection.execute("ALTER TABLE license_requests ADD COLUMN pilot_start TEXT NOT NULL DEFAULT ''")
+            if "usage_outlook" not in request_columns:
+                connection.execute("ALTER TABLE license_requests ADD COLUMN usage_outlook TEXT NOT NULL DEFAULT ''")
             order_columns = {row[1] for row in connection.execute("PRAGMA table_info(license_orders)").fetchall()}
             if "billing_cycle" not in order_columns:
                 connection.execute(
@@ -648,7 +658,7 @@ class Database:
                 "UPDATE invoice_settings SET vat_rate_basis_points=0 WHERE tax_mode='small_business'"
             )
             product_defaults = (
-                ("beta", "Beta-Test", "beta", "none", 0, 1, "days", 14, 10),
+                ("beta", "Vierwöchiger Praxistest", "beta", "none", 0, 1, "days", 28, 10),
                 ("single_monthly", "Einzellizenz monatlich", "single", "monthly", 890, 1, "months", 1, 20),
                 ("single_annual", "Einzellizenz jährlich", "single", "annual", 7900, 1, "years", 1, 30),
                 ("department", "Fachbereichslizenz", "department", "annual", 29900, 5, "years", 1, 40),
@@ -661,6 +671,20 @@ class Database:
                            duration_unit,duration_value,active,sort_order,updated_at
                        ) VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
                     (*product, utcnow()),
+                )
+            # Der frühere 14-Tage-Test war für einen schulischen Praxiseinsatz
+            # zu kurz. Nur der unveränderte Standardwert wird migriert, damit
+            # bewusst angepasste Produktlaufzeiten erhalten bleiben.
+            if not connection.execute("SELECT 1 FROM schema_migrations WHERE version=4").fetchone():
+                connection.execute(
+                    """UPDATE license_products SET name='Vierwöchiger Praxistest',
+                              duration_value=28,updated_at=?
+                         WHERE product_key='beta' AND duration_unit='days' AND duration_value=14""",
+                    (utcnow(),),
+                )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,applied_at) VALUES(4,?)",
+                    (utcnow(),),
                 )
             # Ab Version 3 benötigen sämtliche Lehrkraftkonten eine aktive
             # Lizenz; alte Bestandskonten werden nicht mehr stillschweigend

@@ -63,6 +63,7 @@ const betaDialog=document.querySelector('#beta-dialog');
 const betaDialogClose=betaDialog?.querySelector('.beta-dialog-close');
 const betaDialogLater=betaDialog?.querySelector('.beta-dialog-later');
 const betaContactLinks=document.querySelectorAll('.beta-contact-link');
+const pilotQualification=document.querySelector('#pilot-qualification');
 const betaPopupKey='projektkontor-beta-popup-dismissed-v2';
 function rememberBetaPopup(){
   try{sessionStorage.setItem(betaPopupKey,'true')}catch(error){}
@@ -71,9 +72,18 @@ function closeBetaDialog(){
   if(betaDialog?.open)betaDialog.close();
   rememberBetaPopup();
 }
-function openPreparedContact(subjectText,messageText){
+function setPilotQualification(active){
+  if(!pilotQualification)return;
+  pilotQualification.hidden=!active;
+  pilotQualification.querySelectorAll('input,select').forEach(control=>{
+    control.disabled=!active;
+    if(['organization','usage_outlook'].includes(control.name))control.required=active;
+  });
+}
+function openPreparedContact(subjectText,messageText,pilot=false){
   const subject=contactForm.elements.namedItem('subject');
   const message=contactForm.elements.namedItem('message');
+  setPilotQualification(pilot);
   if(subject)subject.value=subjectText;
   if(message&&!message.value.trim())message.value=messageText;
   history.pushState(null,'','#kontakt');
@@ -82,12 +92,12 @@ function openPreparedContact(subjectText,messageText){
 function prepareBetaRequest(event){
   event.preventDefault();
   closeBetaDialog();
-  openPreparedContact('Kostenloser Beta-Testzugang','Ich interessiere mich für einen kostenfreien Beta-Testzugang für ProjektKontor.');
+  openPreparedContact('Vierwöchiger ProjektKontor-Pilot','Ich möchte ProjektKontor in einem konkreten Unterrichtsvorhaben vier Wochen lang erproben.',true);
 }
 betaContactLinks.forEach(link=>link.addEventListener('click',prepareBetaRequest));
 document.querySelectorAll('.contact-prefill-link').forEach(link=>link.addEventListener('click',event=>{
   event.preventDefault();
-  openPreparedContact(link.dataset.subject||'Interesse an ProjektKontor',link.dataset.message||'Ich interessiere mich für ProjektKontor.');
+  openPreparedContact(link.dataset.subject||'Interesse an ProjektKontor',link.dataset.message||'Ich interessiere mich für ProjektKontor.',false);
 }));
 betaDialogClose?.addEventListener('click',closeBetaDialog);
 betaDialogLater?.addEventListener('click',closeBetaDialog);
@@ -148,7 +158,7 @@ contactForm.addEventListener('submit',async event=>{
   if(!token){contactStatus.textContent='Bitte führen Sie die Menschprüfung durch.';contactStatus.classList.add('error');return}
   contactButton.disabled=true;
   try{
-    const response=await fetch('/api/contact',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({name:fields.get('name'),email:fields.get('email'),subject:fields.get('subject'),message:fields.get('message'),website:fields.get('website'),privacy_accepted:fields.get('privacy_accepted')==='on',turnstile_token:token})});
+    const response=await fetch('/api/contact',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({name:fields.get('name'),email:fields.get('email'),organization:fields.get('organization'),pilot_start:fields.get('pilot_start'),usage_outlook:fields.get('usage_outlook'),subject:fields.get('subject'),message:fields.get('message'),website:fields.get('website'),privacy_accepted:fields.get('privacy_accepted')==='on',turnstile_token:token})});
     const result=await response.json();
     if(!response.ok)throw new Error(result.error||'Die Anfrage konnte nicht versendet werden.');
     contactForm.reset();

@@ -123,7 +123,7 @@ def parse_date(value: Any, field: str) -> str:
 def standard_license_dates(kind: str) -> tuple[str, str]:
     starts = date.today()
     if kind == "beta":
-        ends = starts + timedelta(days=13)
+        ends = starts + timedelta(days=27)
     elif kind == "monthly":
         year = starts.year + (1 if starts.month == 12 else 0)
         month = 1 if starts.month == 12 else starts.month + 1
@@ -605,6 +605,21 @@ class App:
             (teacher_id, today, today),
         ))
 
+    def active_teacher_license(self, teacher_id: int) -> dict[str, Any] | None:
+        """Return the currently usable license and its commercial plan."""
+        self.refresh_expired_licenses()
+        today = date.today().isoformat()
+        return self.db.one(
+            """SELECT l.*,o.plan,o.billing_cycle,o.customer_name,o.organization
+                 FROM license_teachers lt
+                 JOIN licenses l ON l.id=lt.license_id
+                 JOIN license_orders o ON o.id=l.order_id
+                WHERE lt.teacher_id=? AND l.status='active' AND l.archived_at IS NULL
+                  AND l.starts_on<=? AND l.ends_on>=?
+                ORDER BY CASE o.plan WHEN 'beta' THEN 1 ELSE 0 END,l.ends_on DESC LIMIT 1""",
+            (teacher_id, today, today),
+        )
+
     def start_session(self, user_id: int) -> tuple[str, str, int]:
         account = self.db.one("SELECT role,is_owner FROM users WHERE id=? AND active=1", (user_id,))
         if not account:
@@ -757,6 +772,9 @@ class App:
         email = re.sub(r"[\r\n]+", "", str(data.get("email", "")).strip())
         subject = re.sub(r"[\r\n]+", " ", str(data.get("subject", "")).strip())
         message = str(data.get("message", "")).strip()
+        organization = re.sub(r"[\r\n]+", " ", str(data.get("organization", "")).strip())
+        pilot_start = str(data.get("pilot_start", "")).strip()
+        usage_outlook = str(data.get("usage_outlook", "")).strip()
         parsed_email = parseaddr(email)[1]
         if not 2 <= len(name) <= 100:
             raise HttpError(400, "Bitte geben Sie Ihren Namen an.")
@@ -781,26 +799,51 @@ class App:
         self.db.execute("DELETE FROM contact_attempts WHERE attempted_at<?", (old,))
         now = utcnow()
         request_text = f"{subject} {message}".casefold()
-        if any(value in request_text for value in ("beta", "testzugang", "kostenfrei testen")):
+        if any(value in request_text for value in ("beta", "pilot", "testzugang", "kostenfrei testen")):
             request_type = "beta"
         elif any(value in request_text for value in ("lizenz", "preis", "kaufen")):
             request_type = "license"
         else:
             request_type = "contact"
+        usage_labels = {
+            "recurring": "Mehrere Vorhaben pro Schuljahr",
+            "possible": "Ein Vorhaben mit möglicher Folgenutzung",
+            "one_time": "Voraussichtlich einmaliges Vorhaben",
+            "unsure": "Noch offen",
+        }
+        if request_type == "beta":
+            if not 2 <= len(organization) <= 160:
+                raise HttpError(400, "Bitte geben Sie Ihre Schule oder Organisation an.")
+            if usage_outlook not in usage_labels:
+                raise HttpError(400, "Bitte ordnen Sie die geplante weitere Nutzung ein.")
+            if pilot_start:
+                parse_date(pilot_start, "Geplanter Pilotstart")
+        else:
+            organization = organization[:160]
+            pilot_start = ""
+            usage_outlook = ""
         with self.db.transaction() as connection:
             connection.execute(
                 "INSERT INTO contact_attempts(remote_addr,attempted_at) VALUES(?,?)",
                 (remote_addr, now),
             )
             cursor = connection.execute(
-                """INSERT INTO license_requests(name,email,subject,message,request_type,status,
+                """INSERT INTO license_requests(name,email,organization,pilot_start,usage_outlook,
+                   subject,message,request_type,status,
                    email_status,email_error,created_at,updated_at)
-                   VALUES(?,?,?,?,?,'new','pending','',?,?)""",
-                (name, email, subject, message, request_type, now, now),
+                   VALUES(?,?,?,?,?,?,?,?,'new','pending','',?,?)""",
+                (name, email, organization, pilot_start, usage_outlook, subject, message, request_type, now, now),
             )
             request_id = int(cursor.lastrowid)
+        delivery_message = message
+        if request_type == "beta":
+            delivery_message += (
+                f"\n\nSchule / Organisation: {organization}"
+                f"\nGeplanter Start: {pilot_start or 'noch offen'}"
+                f"\nGeplante weitere Nutzung: {usage_labels[usage_outlook]}"
+            )
         try:
-            self._send_contact_email(name, email, subject, message)
+            self._send_contact_email(name, email, subject, delivery_message)
         except HttpError as exc:
             # Ein SMTP-Ausfall darf eine bereits eingegangene Anfrage nicht verlieren.
             self.db.execute(
@@ -1197,7 +1240,8 @@ class App:
     def list_license_requests(self, environ, user):
         self.require_owner(user)
         return self.db.all(
-            """SELECT id,name,email,subject,message,request_type,status,email_status,
+            """SELECT id,name,email,organization,pilot_start,usage_outlook,
+                      subject,message,request_type,status,email_status,
                       email_error,created_at,updated_at
                FROM license_requests
                ORDER BY CASE status WHEN 'new' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
@@ -1216,7 +1260,8 @@ class App:
             (status, utcnow(), request_id),
         )
         return self.db.one(
-            """SELECT id,name,email,subject,message,request_type,status,email_status,
+            """SELECT id,name,email,organization,pilot_start,usage_outlook,
+                      subject,message,request_type,status,email_status,
                       email_error,created_at,updated_at FROM license_requests WHERE id=?""",
             (request_id,),
         )
@@ -1270,10 +1315,10 @@ class App:
                 if ends_on > configured_end:
                     raise HttpError(
                         400,
-                        f"Ein Beta-Testzugang darf gemäß Produktvorgabe höchstens bis {configured_end} laufen.",
+                        f"Ein Pilotzugang darf gemäß Produktvorgabe höchstens bis {configured_end} laufen.",
                     )
             if amount_cents != 0:
-                raise HttpError(400, "Ein Beta-Testzugang muss kostenfrei sein.")
+                raise HttpError(400, "Ein Pilotzugang muss kostenfrei sein.")
             payment_status = "not_required"
         elif plan == "single":
             if amount_cents <= 0:
@@ -1820,7 +1865,7 @@ class App:
                 "für vollständig genutzte Vertragsmonate"
             )
         if license_record["plan"] == "beta":
-            return "ProjektKontor Beta-Testzugang - kostenfreie Testlizenz"
+            return "ProjektKontor Pilotzugang - kostenfreier vierwöchiger Praxistest"
         if license_record["plan"] == "single":
             cycle = "Monatszugang" if license_record.get("billing_cycle") == "monthly" else "Jahreszugang"
             return f"ProjektKontor Einzellizenz - {cycle} für eine Lehrkraft"
@@ -2483,6 +2528,17 @@ class App:
 
     def create_class(self, environ, user):
         teacher = self.require_regular_teacher(user)
+        active_license = self.active_teacher_license(teacher["id"])
+        if active_license and active_license["plan"] == "beta" and self.db.one(
+            """SELECT 1 ok FROM teacher_classes tc JOIN classes c ON c.id=tc.class_id
+                 WHERE tc.teacher_id=? AND c.active=1 LIMIT 1""",
+            (teacher["id"],),
+        ):
+            raise HttpError(
+                409,
+                "Der vierwöchige Praxistest ist auf eine Klasse begrenzt. "
+                "Für weitere Klassen kann der Test begründet verlängert oder in eine Lizenz umgewandelt werden.",
+            )
         name = str(self.body(environ).get("name", "")).strip()
         if not name:
             raise HttpError(400, "Die Klassenbezeichnung darf nicht leer sein.")
@@ -2792,6 +2848,18 @@ class App:
         title = str(data.get("title","")).strip()
         class_id = int(data.get("class_id") or 0); lead_id=int(data.get("project_lead_id") or 0)
         self.require_class_access(user, class_id)
+        active_license = None if user.get("is_owner") else self.active_teacher_license(user["id"])
+        if active_license and active_license["plan"] == "beta" and self.db.one(
+            """SELECT 1 ok FROM projects p
+                 JOIN teacher_classes tc ON tc.class_id=p.class_id
+                WHERE tc.teacher_id=? AND p.status IN ('draft','active') LIMIT 1""",
+            (user["id"],),
+        ):
+            raise HttpError(
+                409,
+                "Im vierwöchigen Praxistest kann gleichzeitig ein aktives Projekt genutzt werden. "
+                "Archivieren Sie das bisherige Projekt oder wechseln Sie in eine reguläre Lizenz.",
+            )
         if not title: raise HttpError(400,"Projekttitel fehlt")
         if len(title)>200: raise HttpError(400,"Der Projekttitel darf höchstens 200 Zeichen enthalten")
         if len(str(data.get("description","")))>20_000: raise HttpError(400,"Die Projektbeschreibung darf höchstens 20.000 Zeichen enthalten")

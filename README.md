@@ -26,7 +26,7 @@ persönliches Administrationskonto eingerichtet. Eine Selbstregistrierung gibt
 es nicht: Der Admin legt Lehrkraftkonten an; jede Lehrkraft verwaltet danach
 ihre eigenen Klassen und Schülerzugänge.
 
-Der Adminbereich enthält außerdem „Bestellungen & Lizenzen“. Dort werden Beta-,
+Der Adminbereich enthält außerdem „Bestellungen & Lizenzen“. Dort werden Pilot-,
 Einzel-, Fachbereichs- und Schullizenzen mit Preis, Zahlungsstatus, Laufzeit,
 Platzanzahl und zugeordneten Lehrkraftkonten verwaltet. Eine Standardlizenz kann
 bereits beim Anlegen oder Bearbeiten einer Lehrkraft erzeugt beziehungsweise
@@ -129,6 +129,6 @@ Weitere Dokumente:
 - Das Kontaktformular anschließend mit einer echten Anfrage prüfen: Eingang an
   der privaten Empfängeradresse, Betreffpräfix `ProjektKontor Anfrage:`,
   Antwortadresse sowie Fehler- und Missbrauchsschutz kontrollieren.
-- Zum Ende eines Beta-Testzugangs automatisch eine Feedbackanfrage per E-Mail
-  versenden. Diese Nachricht ist fachlich vorgesehen, aber noch nicht
-  eingerichtet.
+- Die internen Halbzeit- und Abschlussmeldungen eines Pilotzugangs in der
+  Lizenzverwaltung bearbeiten. Ein automatischer Versand an Lehrkräfte ist
+  bewusst nicht aktiviert, damit Rückmeldungen persönlich abgestimmt werden.
