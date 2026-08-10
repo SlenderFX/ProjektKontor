@@ -30,6 +30,7 @@ from wsgiref.simple_server import make_server
 
 from PIL import Image as PillowImage, UnidentifiedImageError
 
+from . import __version__
 from .config import Config, load_config
 from .db import Database, TEAM_COLOR_PALETTE, seed_project_statuses, utcnow
 from .import_export import (
@@ -736,7 +737,7 @@ class App:
         return ({"ok": True, "csrf": csrf}, "application/json; charset=utf-8", None, [("Set-Cookie", self.session_cookie(session_token, max_age))])
 
     def health(self, environ, user):
-        return {"status": "ok", "version": "0.1.0"}
+        return {"status": "ok", "version": __version__}
 
     def contact_config(self, environ, user):
         return {"turnstile_sitekey": self.config.turnstile_sitekey}
