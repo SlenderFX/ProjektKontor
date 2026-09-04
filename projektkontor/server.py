@@ -3170,7 +3170,18 @@ class App:
     def create_task(self,environ,user,project_id):
         user,project=self.project_access(user,project_id); data=self.body(environ); team_ids=[int(x) for x in data.get("team_ids",[]) if int(x)]
         if not team_ids and data.get("team_id"):team_ids=[int(data["team_id"])]
+        team_ids=list(dict.fromkeys(team_ids))
+        if team_ids:
+            placeholders=",".join("?" for _ in team_ids)
+            valid_teams=self.db.one(
+                f"SELECT COUNT(*) count FROM teams WHERE project_id=? AND status='active' AND id IN ({placeholders})",
+                (project_id,*team_ids),
+            )["count"]
+            if valid_teams!=len(team_ids):raise HttpError(400,"Mindestens ein ausgewähltes Team gehört nicht zum aktiven Projekt")
         if not all(self.can_create_task(user,project_id,team_id) for team_id in (team_ids or [None])):raise HttpError(403,"Nur Teamleitungen dürfen Aufgaben für ihr Team erstellen")
+        assignee_ids=list(dict.fromkeys(int(x) for x in data.get("assignee_ids",[]) if int(x)))
+        if len(team_ids)>1 and assignee_ids:
+            raise HttpError(400,"Bei einer Aufgabe für mehrere Teams werden Verantwortliche anschließend je Teamkopie zugeordnet")
         phase_id=int(data.get("phase_id") or 0) or None
         if phase_id:
             phase=self.db.one("SELECT * FROM phases WHERE id=? AND project_id=?",(phase_id,project_id))
@@ -3189,6 +3200,14 @@ class App:
             created=[]
             for team_id in (team_ids or [None]):
                 cur=connection.execute("""INSERT INTO tasks(project_id,parent_id,team_id,phase_id,title,description,status_key,weight,start_at,due_at,requires_final_approval,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(project_id,parent_id,team_id,phase_id,title,str(data.get("description","")),"open",int(data.get("weight",2)),data.get("start_at"),due_at,int(data.get("requires_final_approval",1)),user["id"],utcnow(),utcnow()));created.append(cur.lastrowid)
+                for assignee_id in assignee_ids:
+                    if team_id:
+                        allowed=connection.execute("SELECT 1 FROM team_members WHERE team_id=? AND user_id=?",(team_id,assignee_id)).fetchone()
+                    else:
+                        allowed=connection.execute("SELECT 1 FROM project_members WHERE project_id=? AND user_id=?",(project_id,assignee_id)).fetchone()
+                    if not allowed:raise HttpError(400,"Verantwortliche müssen dem gewählten Team oder Projekt angehören")
+                    connection.execute("INSERT INTO task_assignees(task_id,user_id,assigned_at) VALUES(?,?,?)",(cur.lastrowid,assignee_id,utcnow()))
+                    connection.execute("INSERT INTO notifications(user_id,project_id,task_id,message,created_at) VALUES(?,?,?,?,?)",(assignee_id,project_id,cur.lastrowid,f"Ihnen wurde die Aufgabe „{title}“ zugewiesen.",utcnow()))
             Database.event(connection,project_id,user["id"],"task.created",f"Aufgabe „{title}“ wurde angelegt.")
         return {"ids":created,"shared_parent_id":parent_id}
 

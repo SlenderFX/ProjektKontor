@@ -217,6 +217,59 @@ class AppFlowTest(unittest.TestCase):
         self.assertIsNone(self.app.db.one("SELECT id FROM tasks WHERE project_id=?", (project_id,)))
         self.assertIsNotNone(self.app.db.one("SELECT id FROM reports WHERE project_id=?", (project_id,)))
 
+    def test_tasks_can_be_assigned_on_creation_with_or_without_team(self):
+        self.setup_teacher()
+        _, klass, _ = self.client.request("POST", "/api/classes", {"name": "TASK26"})
+        _, imported, _ = self.client.request("POST", f"/api/classes/{klass['id']}/import", {
+            "rows": [{"first_name": "Lena"}, {"first_name": "Markus"}]
+        })
+        lena, markus = imported["created"]
+        _, project, _ = self.client.request("POST", "/api/projects", {
+            "title": "Aufgabenfluss", "class_id": klass["id"],
+            "has_start": False, "has_end": False,
+            "project_lead_id": lena["id"], "member_ids": [lena["id"], markus["id"]],
+        })
+
+        status, project_task, _ = self.client.request("POST", f"/api/projects/{project['id']}/tasks", {
+            "title": "Projektauftrag prüfen", "assignee_ids": [lena["id"]], "due_at": "2026-09-20"
+        })
+        self.assertEqual(status, 200)
+        project_task_id = project_task["ids"][0]
+        _, detail, _ = self.client.request("GET", f"/api/projects/{project['id']}")
+        saved_project_task = next(task for task in detail["tasks"] if task["id"] == project_task_id)
+        self.assertIsNone(saved_project_task["team_id"])
+        self.assertEqual([person["id"] for person in saved_project_task["assignees"]], [lena["id"]])
+
+        _, team, _ = self.client.request("POST", f"/api/projects/{project['id']}/teams", {
+            "name": "Einkauf", "color": "#2563EB",
+            "member_ids": [markus["id"]], "lead_ids": [markus["id"]],
+        })
+        status, team_task, _ = self.client.request("POST", f"/api/projects/{project['id']}/tasks", {
+            "title": "Angebote vergleichen", "team_ids": [team["id"]],
+            "assignee_ids": [markus["id"]], "due_at": "2026-09-21",
+        })
+        self.assertEqual(status, 200)
+        _, detail, _ = self.client.request("GET", f"/api/projects/{project['id']}")
+        saved_team_task = next(task for task in detail["tasks"] if task["id"] == team_task["ids"][0])
+        self.assertEqual([person["id"] for person in saved_team_task["assignees"]], [markus["id"]])
+
+        status, invalid, _ = self.client.request("POST", f"/api/projects/{project['id']}/tasks", {
+            "title": "Falsch zugeordnet", "team_ids": [team["id"]],
+            "assignee_ids": [lena["id"]],
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("gewählten Team", invalid["error"])
+        self.assertIsNone(self.app.db.one("SELECT id FROM tasks WHERE title='Falsch zugeordnet'"))
+
+        notifications = self.app.db.all(
+            "SELECT user_id,task_id FROM notifications WHERE task_id IN (?,?) ORDER BY task_id",
+            (project_task_id, team_task["ids"][0]),
+        )
+        self.assertEqual(
+            [(row["user_id"], row["task_id"]) for row in notifications],
+            [(lena["id"], project_task_id), (markus["id"], team_task["ids"][0])],
+        )
+
     def test_student_codes_are_readable_to_teacher(self):
         self.setup_teacher()
         _, klass, _ = self.client.request("POST", "/api/classes", {"name": "KB25"})
