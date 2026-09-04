@@ -55,7 +55,7 @@ LICENSE_PLANS = {
 LICENSE_STATUSES = {"draft", "active", "suspended", "expired", "cancelled"}
 PAYMENT_STATUSES = {"not_required", "open", "paid", "overdue", "refunded", "cancelled"}
 BILLING_CYCLES = {"none", "monthly", "annual"}
-PRIVACY_VERSION = "2026-09-04.1"
+PRIVACY_VERSION = "2026-09-04.2"
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
@@ -243,6 +243,8 @@ class App:
         route("PATCH", r"/api/users/(?P<user_id>\d+)")(self.update_user)
         route("DELETE", r"/api/users/(?P<user_id>\d+)")(self.delete_user)
         route("GET", r"/api/projects")(self.list_projects)
+        route("GET", r"/api/dashboard")(self.dashboard)
+        route("GET", r"/api/search")(self.search_workspace)
         route("POST", r"/api/projects")(self.create_project)
         route("GET", r"/api/projects/(?P<project_id>\d+)")(self.project_detail)
         route("PATCH", r"/api/projects/(?P<project_id>\d+)")(self.update_project)
@@ -694,6 +696,9 @@ class App:
                 ]},
                 {"heading": "Herkunft der Daten", "paragraphs": [
                     "Kontodaten können unmittelbar bei Ihnen erhoben oder durch die Geschäftsführung beziehungsweise Lehrkraft einzeln oder über eine Excel-Importvorlage angelegt werden. Projekt-, Aufgaben- und Inhaltsdaten entstehen anschließend durch die Nutzung von ProjektKontor sowie durch Zuweisungen berechtigter Projekt- und Teamleitungen.",
+                ]},
+                {"heading": "Lokale Filtereinstellungen", "paragraphs": [
+                    "Selbst gespeicherte Aufgabenfilter werden ausschließlich im lokalen Speicher des verwendeten Browsers abgelegt. Sie werden nicht an den ProjektKontor-Server übertragen und können durch das Löschen der Websitedaten im Browser entfernt werden.",
                 ]},
                 {"heading": "Rechtsgrundlage", "paragraphs": [self.config.privacy_legal_basis]},
                 {"heading": "Empfänger und Sichtbarkeit", "paragraphs": [
@@ -2853,6 +2858,106 @@ class App:
             row["progress"] = round(100*row["done_count"]/row["task_count"]) if row["task_count"] else 0
         return rows
 
+    def dashboard(self, environ, user):
+        user = self.require_user(user)
+        projects = [project for project in self.list_projects(environ, user) if project["can_open"]]
+        today = date.today()
+        week_end = today + timedelta(days=7)
+        compact_tasks: list[dict[str, Any]] = []
+        workload: dict[int, dict[str, Any]] = {}
+        portfolio: list[dict[str, Any]] = []
+        for project in projects:
+            detail = self.project_detail(environ, user, project["id"])
+            tasks = [task for task in detail["tasks"] if not task["is_shared_parent"]]
+            open_tasks = [task for task in tasks if task["status_key"] != "done"]
+            overdue = [task for task in open_tasks if task.get("due_at") and date.fromisoformat(str(task["due_at"])[:10]) < today]
+            blocked = [task for task in open_tasks if task["status_key"] == "blocked"]
+            waiting = [task for task in open_tasks if task["dependency_blocked"]]
+            due_soon = [
+                task for task in open_tasks
+                if task.get("due_at") and today <= date.fromisoformat(str(task["due_at"])[:10]) <= week_end
+            ]
+            unassigned = [task for task in open_tasks if not task["assignees"]]
+            milestones = [task for task in tasks if task["is_milestone"]]
+            project_summary = dict(project)
+            project_summary.update({
+                "open_task_count": len(open_tasks),
+                "blocked_task_count": len(blocked),
+                "waiting_task_count": len(waiting),
+                "overdue_task_count": len(overdue),
+                "due_soon_task_count": len(due_soon),
+                "unassigned_task_count": len(unassigned),
+                "milestone_count": len(milestones),
+                "completed_milestone_count": sum(task["status_key"] == "done" for task in milestones),
+                "risk": "critical" if overdue else "warning" if blocked or due_soon else "on_track",
+            })
+            portfolio.append(project_summary)
+            for task in tasks:
+                task_summary = {
+                    key: task.get(key) for key in (
+                        "id", "title", "description", "status_key", "status_label", "status_color",
+                        "system_kind", "team_id", "team_name", "phase_id", "phase_name", "weight",
+                        "start_at", "due_at", "is_milestone", "blocked_reason", "dependency_blocked",
+                    )
+                }
+                task_summary.update({
+                    "project_id": project["id"], "project_title": project["title"],
+                    "project_status": project["status"], "class_name": project["class_name"], "assignees": task["assignees"],
+                    "dependencies": task["dependencies"],
+                })
+                compact_tasks.append(task_summary)
+                if task["status_key"] == "done":
+                    continue
+                due_on = date.fromisoformat(str(task["due_at"])[:10]) if task.get("due_at") else None
+                for assignee in task["assignees"]:
+                    row = workload.setdefault(assignee["id"], {
+                        "id": assignee["id"], "name": assignee["first_name"], "task_count": 0,
+                        "weight": 0, "overdue_count": 0, "due_soon_count": 0,
+                    })
+                    row["task_count"] += 1
+                    row["weight"] += int(task["weight"] or 0)
+                    row["overdue_count"] += int(bool(due_on and due_on < today))
+                    row["due_soon_count"] += int(bool(due_on and today <= due_on <= week_end))
+        compact_tasks.sort(key=lambda task: (task.get("due_at") is None, task.get("due_at") or "", task["title"].casefold()))
+        portfolio.sort(key=lambda project: ({"critical": 0, "warning": 1, "on_track": 2}[project["risk"]], -project["open_task_count"], project["title"].casefold()))
+        workload_rows = sorted(workload.values(), key=lambda row: (-row["overdue_count"], -row["weight"], row["name"].casefold()))
+        return {"projects": portfolio, "tasks": compact_tasks, "workload": workload_rows, "generated_on": today.isoformat()}
+
+    def search_workspace(self, environ, user):
+        query = str(self.query(environ).get("q", "")).strip()
+        if len(query) < 2:
+            return {"query": query, "projects": [], "tasks": [], "people": []}
+        if len(query) > 100:
+            raise HttpError(400, "Der Suchbegriff darf höchstens 100 Zeichen enthalten.")
+        needle = query.casefold()
+        data = self.dashboard(environ, user)
+        projects = [
+            project for project in data["projects"]
+            if needle in " ".join(str(project.get(key) or "") for key in ("title", "description", "class_name", "lead_name")).casefold()
+        ][:20]
+        tasks = [
+            task for task in data["tasks"]
+            if needle in " ".join([
+                str(task.get("title") or ""), str(task.get("description") or ""),
+                str(task.get("project_title") or ""), str(task.get("team_name") or ""),
+                " ".join(person["first_name"] for person in task["assignees"]),
+            ]).casefold()
+        ][:40]
+        people_by_id: dict[int, dict[str, Any]] = {}
+        for task in data["tasks"]:
+            for person in task["assignees"]:
+                if needle in person["first_name"].casefold():
+                    item = people_by_id.setdefault(person["id"], {
+                        "id": person["id"], "name": person["first_name"], "projects": {}, "open_task_count": 0,
+                    })
+                    item["projects"][task["project_id"]] = task["project_title"]
+                    item["open_task_count"] += int(task["status_key"] != "done")
+        people = [
+            {**person, "projects": [{"id": project_id, "title": title} for project_id, title in person["projects"].items()]}
+            for person in people_by_id.values()
+        ][:20]
+        return {"query": query, "projects": projects, "tasks": tasks, "people": people}
+
     def create_project(self, environ, user):
         user = self.require_teacher(user)
         data = self.body(environ)
@@ -2940,11 +3045,11 @@ class App:
                     phase_map[int(phase["id"])] = int(phase_cursor.lastrowid)
                 for task in snapshot.get("tasks", []):
                     connection.execute(
-                        """INSERT INTO tasks(project_id,team_id,phase_id,title,description,status_key,weight,start_at,due_at,requires_final_approval,created_by,created_at,updated_at)
-                           VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?)""",
+                        """INSERT INTO tasks(project_id,team_id,phase_id,title,description,status_key,weight,start_at,due_at,requires_final_approval,is_milestone,created_by,created_at,updated_at)
+                           VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?)""",
                         (project_id, team_map.get(task.get("team_id")), phase_map.get(task.get("phase_id")), task["title"], task.get("description", ""),
                          task.get("weight", 2), shifted(task.get("start_at"), start_at), shifted(task.get("due_at"), end_at),
-                         task.get("requires_final_approval", 1), user["id"], utcnow(), utcnow()),
+                         task.get("requires_final_approval", 1), int(bool(task.get("is_milestone"))), user["id"], utcnow(), utcnow()),
                     )
             Database.event(connection,project_id,user["id"],"project.created",f"Projekt „{title}“ wurde gestartet.")
         return {"id":project_id}
@@ -2985,7 +3090,13 @@ class App:
         result["tasks"] = self.db.all(f"""SELECT t.*,tm.name team_name,ph.name phase_name,s.label status_label,s.color status_color,s.system_kind FROM tasks t LEFT JOIN teams tm ON tm.id=t.team_id LEFT JOIN phases ph ON ph.id=t.phase_id LEFT JOIN task_statuses s ON s.project_id=t.project_id AND s.key=t.status_key WHERE t.project_id=?{task_scope_sql} ORDER BY t.created_at""", tuple([project_id] + task_scope_params))
         for task in result["tasks"]:
             task["assignees"]=self.db.all("SELECT u.id,u.first_name FROM task_assignees a JOIN users u ON u.id=a.user_id WHERE a.task_id=? ORDER BY u.first_name",(task["id"],))
-            task["dependencies"]=self.db.all("SELECT depends_on_id FROM task_dependencies WHERE task_id=?",(task["id"],))
+            task["dependencies"]=self.db.all(
+                """SELECT dependency.id depends_on_id,dependency.title,dependency.status_key
+                     FROM task_dependencies relation JOIN tasks dependency ON dependency.id=relation.depends_on_id
+                     WHERE relation.task_id=? ORDER BY dependency.due_at,dependency.title""",
+                (task["id"],),
+            )
+            task["dependency_blocked"] = any(dependency["status_key"] != "done" for dependency in task["dependencies"])
             task["comments"]=self.db.all("""SELECT c.*,u.first_name author_name FROM comments c JOIN users u ON u.id=c.author_id WHERE c.task_id=? ORDER BY c.created_at""",(task["id"],))
             task["upload_count"]=self.db.one("SELECT COUNT(*) count FROM uploads WHERE task_id=?",(task["id"],))["count"]
             task["deadline_requests"]=self.db.all("""SELECT dr.*,u.first_name requested_by_name,d.first_name decided_by_name
@@ -3203,14 +3314,16 @@ class App:
         if len(title)>200:raise HttpError(400,"Der Aufgabentitel darf höchstens 200 Zeichen enthalten")
         if len(str(data.get("description","")))>20_000:raise HttpError(400,"Die Aufgabenbeschreibung darf höchstens 20.000 Zeichen enthalten")
         due_at = normalize_due_at(data.get("due_at"))
+        if data.get("is_milestone") and not due_at:
+            raise HttpError(400, "Ein Meilenstein benötigt ein Fälligkeitsdatum.")
         with self.db.transaction() as connection:
             shared=len(team_ids)>1
             parent_id=None
             if shared:
-                cur=connection.execute("""INSERT INTO tasks(project_id,phase_id,title,description,status_key,weight,start_at,due_at,is_shared_parent,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?,?,?)""",(project_id,phase_id,title,str(data.get("description","")),"open",int(data.get("weight",2)),data.get("start_at"),due_at,user["id"],utcnow(),utcnow()));parent_id=cur.lastrowid
+                cur=connection.execute("""INSERT INTO tasks(project_id,phase_id,title,description,status_key,weight,start_at,due_at,is_milestone,is_shared_parent,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)""",(project_id,phase_id,title,str(data.get("description","")),"open",int(data.get("weight",2)),data.get("start_at"),due_at,int(bool(data.get("is_milestone"))),user["id"],utcnow(),utcnow()));parent_id=cur.lastrowid
             created=[]
             for team_id in (team_ids or [None]):
-                cur=connection.execute("""INSERT INTO tasks(project_id,parent_id,team_id,phase_id,title,description,status_key,weight,start_at,due_at,requires_final_approval,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(project_id,parent_id,team_id,phase_id,title,str(data.get("description","")),"open",int(data.get("weight",2)),data.get("start_at"),due_at,int(data.get("requires_final_approval",1)),user["id"],utcnow(),utcnow()));created.append(cur.lastrowid)
+                cur=connection.execute("""INSERT INTO tasks(project_id,parent_id,team_id,phase_id,title,description,status_key,weight,start_at,due_at,requires_final_approval,is_milestone,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(project_id,parent_id,team_id,phase_id,title,str(data.get("description","")),"open",int(data.get("weight",2)),data.get("start_at"),due_at,int(data.get("requires_final_approval",1)),int(bool(data.get("is_milestone"))),user["id"],utcnow(),utcnow()));created.append(cur.lastrowid)
                 for assignee_id in assignee_ids:
                     if team_id:
                         allowed=connection.execute("SELECT 1 FROM team_members WHERE team_id=? AND user_id=?",(team_id,assignee_id)).fetchone()
@@ -3241,9 +3354,23 @@ class App:
         if status=="done" and not (manager or team_lead):raise HttpError(403,"Nur Leitungsrollen dürfen freigeben")
         if status=="done" and task["requires_final_approval"] and not manager:
             raise HttpError(403,"Diese Aufgabe benötigt die Freigabe der Gesamtprojektleitung oder Geschäftsführung")
+        if status == "done" and self.db.one(
+            """SELECT 1 ok FROM task_dependencies relation JOIN tasks dependency ON dependency.id=relation.depends_on_id
+                 WHERE relation.task_id=? AND dependency.status_key!='done' LIMIT 1""",
+            (task_id,),
+        ):
+            raise HttpError(409, "Diese Aufgabe kann erst abgeschlossen werden, wenn alle Vorgängeraufgaben erledigt sind.")
+        if status is not None and status != "done" and task["status_key"] == "done" and self.db.one(
+            """SELECT 1 ok FROM task_dependencies relation JOIN tasks successor ON successor.id=relation.task_id
+                 WHERE relation.depends_on_id=? AND successor.status_key='done' LIMIT 1""",
+            (task_id,),
+        ):
+            raise HttpError(409, "Die Aufgabe kann nicht wieder geöffnet werden, solange eine abhängige Folgeaufgabe bereits erledigt ist.")
+        if data.get("is_milestone") and not (data.get("due_at") or task.get("due_at")):
+            raise HttpError(400, "Ein Meilenstein benötigt ein Fälligkeitsdatum.")
         if status in {"blocked","revision"} and not str(data.get("blocked_reason",task["blocked_reason"])).strip():raise HttpError(400,"Bitte geben Sie einen Grund an")
         fields=[];params=[]
-        allowed=("title","description","result_text","status_key","weight","start_at","due_at","phase_id","blocked_reason") if (manager or team_lead) else ("result_text","status_key","blocked_reason")
+        allowed=("title","description","result_text","status_key","weight","start_at","due_at","phase_id","blocked_reason","is_milestone") if (manager or team_lead) else ("result_text","status_key","blocked_reason")
         limits={"title":200,"description":20_000,"result_text":20_000,"blocked_reason":4_000}
         for key in allowed:
             if key in data:
@@ -3252,7 +3379,7 @@ class App:
                 if key == "due_at":
                     params.append(normalize_due_at(data[key]))
                 else:
-                    params.append(data[key] or None if key=="phase_id" else data[key])
+                    params.append(int(bool(data[key])) if key == "is_milestone" else data[key] or None if key=="phase_id" else data[key])
         if fields:self.db.execute(f"UPDATE tasks SET {','.join(fields)},updated_at=? WHERE id=?",tuple(params+[utcnow(),task_id]))
         if status in {"blocked","approval","revision","done"}:
             message={"blocked":"Aufgabe wurde als blockiert gemeldet.","approval":"Aufgabe wartet auf Freigabe.","revision":"Aufgabe wurde zur Überarbeitung zurückgegeben.","done":"Aufgabe wurde freigegeben."}[status]
@@ -3285,10 +3412,38 @@ class App:
     def set_task_dependencies(self,environ,user,task_id):
         task=self.db.one("SELECT * FROM tasks WHERE id=?",(task_id,));
         if not task:raise HttpError(404,"Aufgabe nicht gefunden")
-        self.project_access(user,task["project_id"],manage=True);ids=[int(x) for x in self.body(environ).get("depends_on_ids",[]) if int(x)!=task_id]
+        self.project_access(user,task["project_id"],manage=True);ids=list(dict.fromkeys(int(x) for x in self.body(environ).get("depends_on_ids",[]) if int(x)!=task_id))
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            count = self.db.one(
+                f"SELECT COUNT(*) count FROM tasks WHERE project_id=? AND id IN ({placeholders}) AND is_shared_parent=0",
+                (task["project_id"], *ids),
+            )["count"]
+            if count != len(ids):
+                raise HttpError(400, "Mindestens eine Vorgängeraufgabe gehört nicht zu diesem Projekt.")
+            for dependency_id in ids:
+                cycle = self.db.one(
+                    """WITH RECURSIVE predecessors(id) AS (
+                           SELECT depends_on_id FROM task_dependencies WHERE task_id=?
+                           UNION
+                           SELECT relation.depends_on_id FROM task_dependencies relation
+                           JOIN predecessors ON relation.task_id=predecessors.id
+                       ) SELECT 1 ok FROM predecessors WHERE id=? LIMIT 1""",
+                    (dependency_id, task_id),
+                )
+                if cycle:
+                    raise HttpError(409, "Diese Abhängigkeit würde einen Kreis erzeugen.")
+            if task["status_key"] == "done":
+                placeholders = ",".join("?" for _ in ids)
+                incomplete = self.db.one(
+                    f"SELECT 1 ok FROM tasks WHERE id IN ({placeholders}) AND status_key!='done' LIMIT 1",
+                    tuple(ids),
+                )
+                if incomplete:
+                    raise HttpError(409, "Eine erledigte Aufgabe darf nicht von offenen Vorgängeraufgaben abhängen.")
         with self.db.transaction() as connection:
             connection.execute("DELETE FROM task_dependencies WHERE task_id=?",(task_id,))
-            for dep in set(ids):connection.execute("INSERT INTO task_dependencies(task_id,depends_on_id) SELECT ?,id FROM tasks WHERE id=? AND project_id=?",(task_id,dep,task["project_id"]))
+            for dep in ids:connection.execute("INSERT INTO task_dependencies(task_id,depends_on_id) VALUES(?,?)",(task_id,dep))
         return {"ok":True}
 
     def create_deadline_request(self,environ,user,task_id):
@@ -3451,7 +3606,7 @@ class App:
             "start_has_time": project.get("start_has_time", 1), "end_has_time": project.get("end_has_time", 1),
             "teams": self.db.all("SELECT id,name,responsibility,color FROM teams WHERE project_id=? AND status='active' ORDER BY name", (project_id,)),
             "phases": self.db.all("SELECT id,name,description,expected_result,start_at,end_at,sort_order FROM phases WHERE project_id=? ORDER BY sort_order",(project_id,)),
-            "tasks": self.db.all("SELECT title,description,weight,phase_id,team_id,start_at,due_at,requires_final_approval FROM tasks WHERE project_id=? AND parent_id IS NULL AND is_shared_parent=0",(project_id,))
+            "tasks": self.db.all("SELECT title,description,weight,phase_id,team_id,start_at,due_at,requires_final_approval,is_milestone FROM tasks WHERE project_id=? AND parent_id IS NULL AND is_shared_parent=0",(project_id,))
         }
         try:tid=self.db.execute("INSERT INTO templates(name,source_project_id,snapshot_json,created_by,created_at) VALUES(?,?,?,?,?)",(name,project_id,json.dumps(snapshot,ensure_ascii=False),user["id"],utcnow()))
         except sqlite3.IntegrityError:raise HttpError(409,"Vorlagenname bereits vergeben")

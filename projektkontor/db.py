@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_at TEXT,
     required INTEGER NOT NULL DEFAULT 1,
     requires_final_approval INTEGER NOT NULL DEFAULT 1,
+    is_milestone INTEGER NOT NULL DEFAULT 0,
     is_shared_parent INTEGER NOT NULL DEFAULT 0,
     blocked_reason TEXT NOT NULL DEFAULT '',
     created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
@@ -524,6 +525,17 @@ class Database:
                 connection.execute("ALTER TABLE users ADD COLUMN initial_credentials_emailed_at TEXT")
             if "archived_at" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN archived_at TEXT")
+            task_columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)").fetchall()}
+            if "is_milestone" not in task_columns:
+                connection.execute("ALTER TABLE tasks ADD COLUMN is_milestone INTEGER NOT NULL DEFAULT 0")
+            if not connection.execute("SELECT 1 FROM schema_migrations WHERE version=5").fetchone():
+                # In älteren Oberflächen stand die Gewichtungsstufe 5 bereits
+                # unter der Bezeichnung „Meilenstein“.
+                connection.execute("UPDATE tasks SET is_milestone=1 WHERE weight=5")
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,applied_at) VALUES(5,?)",
+                    (utcnow(),),
+                )
             request_columns = {row[1] for row in connection.execute("PRAGMA table_info(license_requests)").fetchall()}
             if "organization" not in request_columns:
                 connection.execute("ALTER TABLE license_requests ADD COLUMN organization TEXT NOT NULL DEFAULT ''")

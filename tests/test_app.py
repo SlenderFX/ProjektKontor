@@ -30,6 +30,7 @@ class Client:
     def request(self, method: str, path: str, body=None):
         raw = json.dumps(body or {}).encode() if body is not None else b""
         captured = {}
+        path_info, _, query_string = path.partition("?")
 
         def start_response(status, headers):
             captured["status"] = int(status.split()[0])
@@ -37,8 +38,8 @@ class Client:
 
         environ = {
             "REQUEST_METHOD": method,
-            "PATH_INFO": path,
-            "QUERY_STRING": "",
+            "PATH_INFO": path_info,
+            "QUERY_STRING": query_string,
             "CONTENT_LENGTH": str(len(raw)),
             "CONTENT_TYPE": "application/json",
             "HTTP_COOKIE": self.cookie,
@@ -269,6 +270,64 @@ class AppFlowTest(unittest.TestCase):
             [(row["user_id"], row["task_id"]) for row in notifications],
             [(lena["id"], project_task_id), (markus["id"], team_task["ids"][0])],
         )
+
+    def test_dashboard_search_milestones_workload_and_dependencies(self):
+        self.setup_teacher()
+        _, bootstrap, _ = self.client.request("GET", "/api/bootstrap")
+        teacher_id = bootstrap["user"]["id"]
+        _, klass, _ = self.client.request("POST", "/api/classes", {"name": "DB26"})
+        _, imported, _ = self.client.request("POST", f"/api/classes/{klass['id']}/import", {
+            "rows": [{"first_name": "Mira"}]
+        })
+        mira_id = imported["created"][0]["id"]
+        _, project, _ = self.client.request("POST", "/api/projects", {
+            "title": "Dashboard-Projekt", "class_id": klass["id"], "description": "Portfolio-Test",
+            "start_at": "2026-09-01", "end_at": "2026-10-31",
+            "project_lead_id": teacher_id, "member_ids": [teacher_id, mira_id],
+        })
+        _, predecessor, _ = self.client.request("POST", f"/api/projects/{project['id']}/tasks", {
+            "title": "Konzept freigeben", "assignee_ids": [mira_id], "weight": 3,
+            "is_milestone": True, "due_at": "2020-01-02",
+        })
+        predecessor_id = predecessor["ids"][0]
+        _, dependent, _ = self.client.request("POST", f"/api/projects/{project['id']}/tasks", {
+            "title": "Präsentation vorbereiten", "assignee_ids": [mira_id], "weight": 2,
+            "due_at": "2099-01-02",
+        })
+        dependent_id = dependent["ids"][0]
+        status, _, _ = self.client.request("POST", f"/api/tasks/{dependent_id}/dependencies", {
+            "depends_on_ids": [predecessor_id]
+        })
+        self.assertEqual(status, 200)
+
+        _, detail, _ = self.client.request("GET", f"/api/projects/{project['id']}")
+        predecessor_task = next(task for task in detail["tasks"] if task["id"] == predecessor_id)
+        dependent_task = next(task for task in detail["tasks"] if task["id"] == dependent_id)
+        self.assertEqual(predecessor_task["is_milestone"], 1)
+        self.assertTrue(dependent_task["dependency_blocked"])
+        self.assertEqual(dependent_task["dependencies"][0]["title"], "Konzept freigeben")
+
+        status, dashboard, _ = self.client.request("GET", "/api/dashboard")
+        self.assertEqual(status, 200)
+        portfolio = next(item for item in dashboard["projects"] if item["id"] == project["id"])
+        self.assertEqual(portfolio["risk"], "critical")
+        self.assertEqual(portfolio["milestone_count"], 1)
+        self.assertEqual(next(item for item in dashboard["workload"] if item["id"] == mira_id)["task_count"], 2)
+
+        status, results, _ = self.client.request("GET", "/api/search?q=Pr%C3%A4sentation")
+        self.assertEqual(status, 200)
+        self.assertEqual([task["id"] for task in results["tasks"]], [dependent_id])
+
+        status, blocked, _ = self.client.request("PATCH", f"/api/tasks/{dependent_id}", {"status_key": "done"})
+        self.assertEqual(status, 409)
+        self.assertIn("Vorgängeraufgaben", blocked["error"])
+        status, cycle, _ = self.client.request("POST", f"/api/tasks/{predecessor_id}/dependencies", {
+            "depends_on_ids": [dependent_id]
+        })
+        self.assertEqual(status, 409)
+        self.assertIn("Kreis", cycle["error"])
+        self.assertEqual(self.client.request("PATCH", f"/api/tasks/{predecessor_id}", {"status_key": "done"})[0], 200)
+        self.assertEqual(self.client.request("PATCH", f"/api/tasks/{dependent_id}", {"status_key": "done"})[0], 200)
 
     def test_student_codes_are_readable_to_teacher(self):
         self.setup_teacher()

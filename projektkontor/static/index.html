@@ -51,9 +51,13 @@
         <span>ProjektKontor</span>
       </a>
       <nav id="nav">
-        <a href="#/" data-route="home" class="workspace-nav"><span>⌂</span>Start</a>
+        <a href="#/" data-route="home" class="workspace-nav"><span>⌂</span>Übersicht</a>
         <a href="#/tasks" data-route="tasks" class="workspace-nav"><span>✓</span>Meine Aufgaben</a>
+        <a href="#/portfolio" data-route="portfolio" class="workspace-nav"><span>▤</span>Portfolio</a>
+        <a href="#/calendar" data-route="calendar" class="workspace-nav"><span>□</span>Kalender</a>
+        <a href="#/workload" data-route="workload" class="workspace-nav"><span>◫</span>Auslastung</a>
         <a href="#/projects" data-route="projects" class="workspace-nav"><span>▦</span>Projekte</a>
+        <a href="#/search" data-route="search" class="workspace-nav"><span>⌕</span>Suche</a>
         <a href="#/notifications" data-route="notifications" class="workspace-nav"><span>●</span>Hinweise <b id="notification-count" class="badge hidden">0</b></a>
         <a href="#/admin" data-route="admin" class="teacher-only"><span>⚙</span>Verwaltung</a>
       </nav>
@@ -66,6 +70,11 @@
       <header class="topbar">
         <button id="menu-toggle" class="icon-button" aria-label="Menü öffnen">☰</button>
         <div id="breadcrumbs"></div>
+        <form id="global-search-form" class="global-search workspace-nav" role="search">
+          <label class="sr-only" for="global-search">ProjektKontor durchsuchen</label>
+          <input id="global-search" type="search" maxlength="100" placeholder="Projekte, Aufgaben, Personen …" autocomplete="off">
+          <button type="submit" class="icon-button" aria-label="Suchen">⌕</button>
+        </form>
         <button id="quick-notifications" class="icon-button workspace-nav" aria-label="Hinweise">●</button>
       </header>
       <main id="content" class="content" tabindex="-1"></main>

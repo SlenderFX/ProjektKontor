@@ -3,10 +3,12 @@
 ProjektKontor ist eine selbst gehostete Projektmanagement-Anwendung für den
 Wirtschaftsunterricht an Berufsschulen. Das MVP bildet Klassen, verwaltete
 Schülerzugänge, Projektteams, Aufgaben, Freigaben, ein synchronisiertes
-Kanban-Board, eine Gantt-Übersicht sowie PDF-Projektberichte ab. Teamleitungen
-erhalten eine eigene Verteilansicht; Fristverlängerungen, moderierbare
-Kommentare und projektbezogene Schülerorganisation sind im Aufgabenablauf
-integriert.
+Kanban-Board, eine Gantt-Übersicht sowie PDF-Projektberichte ab. Das zentrale
+Dashboard ergänzt ein projektübergreifendes Portfolio, Kalender, Meilensteine,
+Aufgabenabhängigkeiten, Auslastung, globale Suche und lokal gespeicherte
+Aufgabenfilter. Teamleitungen erhalten eine eigene Verteilansicht;
+Fristverlängerungen, moderierbare Kommentare und projektbezogene
+Schülerorganisation sind im Aufgabenablauf integriert.
 
 ## Lokal starten
 
@@ -57,8 +59,8 @@ Python verwendet werden, sofern die Abhängigkeiten dort vorhanden sind.
 | `PK_MAX_UPLOAD_MB` | `25` | Maximale Dateigröße |
 | `PK_COOKIE_SECURE` | `0` lokal, auf Server `1` | Sitzungscookie nur über HTTPS |
 | `PK_TRUST_PROXY` | `0` lokal, in Docker `1` | Weitergeleitete Clientadresse ausschließlich hinter einem vertrauenswürdigen Reverse Proxy auswerten |
-| `PK_PRIVACY_CONTROLLER_*` | lokale Platzhalter | Verantwortlicher, Anschrift, Kontakt und Datenschutzbeauftragte für die Datenschutzinformation |
-| `PK_PRIVACY_LEGAL_BASIS` | lokaler Platzhalter | Von Schule oder Schulträger bestätigte Rechtsgrundlage |
+| `PK_PRIVACY_CONTROLLER_*` | PRIMEAdvisory | Verantwortlicher, Anschrift und Datenschutzkontakt der Installation; bei schulischer Verantwortlichkeit durch die Angaben von Schule oder Schulträger ersetzen |
+| `PK_PRIVACY_LEGAL_BASIS` | Hinweis auf die installationsbezogene Festlegung | Von Schule oder Schulträger bestätigte konkrete Rechtsgrundlage ergänzen |
 | `PK_CONTACT_RECIPIENT` | private Empfängeradresse | Nur serverseitiges Ziel des Kontaktformulars; wird nicht an den Browser ausgeliefert |
 | `PK_SMTP_*` | nicht gesetzt | Mailserver, Port, Benutzername, Passwort, Absender und SSL für den Formularversand |
 | `PK_TURNSTILE_SITEKEY`, `PK_TURNSTILE_SECRET` | lokale Testschlüssel | Cloudflare-Turnstile-Schlüssel für die Menschprüfung; produktiv zwingend ersetzen |
