@@ -1710,6 +1710,13 @@ class AppFlowTest(unittest.TestCase):
         status, information, _ = client.request("GET", "/api/privacy")
         self.assertEqual(status, 200)
         self.assertEqual(information["version"], pending["privacy_version"])
+        self.assertEqual(information["operator"]["name"], "PRIMEAdvisory")
+        self.assertEqual(information["operator"]["owner"], "Inhaber: Jeroen L. Jochem")
+        self.assertEqual(information["operator"]["email"], "info@prime-advisory.de")
+        self.assertIn("Nieberdingstr. 41", information["operator"]["address"])
+        self.assertIn("PRIMEAdvisory", information["controller"]["name"])
+        self.assertNotIn("example", information["controller"]["email"])
+        self.assertIn("Rollen und Verantwortlichkeit", [section["heading"] for section in information["sections"]])
         self.assertIn("Verarbeitete Daten", [section["heading"] for section in information["sections"]])
         status, accepted, headers = client.request("POST", "/api/privacy/accept", {
             "privacy_token": pending["privacy_token"], "privacy_version": pending["privacy_version"]

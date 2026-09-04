@@ -55,7 +55,7 @@ LICENSE_PLANS = {
 LICENSE_STATUSES = {"draft", "active", "suspended", "expired", "cancelled"}
 PAYMENT_STATUSES = {"not_required", "open", "paid", "overdue", "refunded", "cancelled"}
 BILLING_CYCLES = {"none", "monthly", "annual"}
-PRIVACY_VERSION = "2026-07-24.1"
+PRIVACY_VERSION = "2026-09-04.1"
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
@@ -661,6 +661,13 @@ class App:
         return {
             "version": PRIVACY_VERSION,
             "title": "Datenschutzinformation nach Art. 13 und 14 DSGVO",
+            "operator": {
+                "name": "PRIMEAdvisory",
+                "owner": "Inhaber: Jeroen L. Jochem",
+                "address": "Nieberdingstr. 41, 45147 Essen, Deutschland",
+                "email": "info@prime-advisory.de",
+                "phone": "0201 8438179-0",
+            },
             "controller": {
                 "name": self.config.privacy_controller_name,
                 "address": self.config.privacy_controller_address,
@@ -668,6 +675,10 @@ class App:
                 "dpo": self.config.privacy_dpo_contact,
             },
             "sections": [
+                {"heading": "Rollen und Verantwortlichkeit", "paragraphs": [
+                    "PRIMEAdvisory betreibt und entwickelt ProjektKontor und ist Ansprechpartner für den technischen Betrieb, die öffentliche Website, Vertragsanbahnung und Abrechnung.",
+                    "Bestimmt eine Schule beziehungsweise ihr zuständiger Schulträger die Zwecke und Mittel des Unterrichtseinsatzes, ist diese Stelle für die dabei verarbeiteten Unterrichtsdaten verantwortlich. Die für diese Installation hinterlegte verantwortliche Stelle und ihr Datenschutzkontakt werden oben ausgewiesen.",
+                ]},
                 {"heading": "Zwecke der Verarbeitung", "paragraphs": [
                     "ProjektKontor dient der Organisation schulischer Projekte, der Verteilung und Bearbeitung von Aufgaben, der Zusammenarbeit in Projektteams sowie der Dokumentation des Projektverlaufs. Lehrkräfte können außerdem freiwillig einen befristeten Supportzugriff anfordern.",
                 ]},
