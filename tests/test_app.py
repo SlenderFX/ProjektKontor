@@ -1842,10 +1842,16 @@ class AppFlowTest(unittest.TestCase):
         self.assertTrue(accepted["ok"])
         self.assertIn("Set-Cookie", headers)
         self.assertEqual(self.app.db.one("SELECT COUNT(*) count FROM privacy_acceptances")["count"], 1)
+        account = self.app.db.one("SELECT id,privacy_version_accepted,privacy_accepted_at FROM users WHERE username='lehrkraft'")
+        self.assertEqual(account["privacy_version_accepted"], pending["privacy_version"])
+        self.assertTrue(account["privacy_accepted_at"])
         status, _, _ = client.request("POST", "/api/privacy/accept", {
             "privacy_token": pending["privacy_token"], "privacy_version": pending["privacy_version"]
         })
         self.assertEqual(status, 401)
+
+        # Ältere Bestätigungen aus der Nachweistabelle heilen den Kontomarker selbst.
+        self.app.db.execute("UPDATE users SET privacy_version_accepted=NULL,privacy_accepted_at=NULL WHERE id=?", (account["id"],))
         client.request("POST", "/api/logout", {})
         status, logged_in, _ = client.request("POST", "/api/login", {
             "username": "lehrkraft", "password": "sicheres-testkennwort"
@@ -1853,6 +1859,38 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(logged_in["ok"])
         self.assertNotIn("privacy_required", logged_in)
+        self.assertEqual(self.app.db.one("SELECT privacy_version_accepted FROM users WHERE id=?", (account["id"],))["privacy_version_accepted"], pending["privacy_version"])
+
+        # Der direkte Kontomarker verhindert die erneute Abfrage bei jedem Login.
+        self.app.db.execute("DELETE FROM privacy_acceptances WHERE user_id=?", (account["id"],))
+        client.request("POST", "/api/logout", {})
+        status, logged_in_again, _ = client.request("POST", "/api/login", {
+            "username": "lehrkraft", "password": "sicheres-testkennwort"
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(logged_in_again["ok"])
+        self.assertNotIn("privacy_required", logged_in_again)
+
+    def test_teacher_privacy_confirmation_survives_logout_and_login(self):
+        teacher = self.setup_teacher()
+        self.client.auto_privacy = False
+        self.assertEqual(self.client.request("POST", "/api/logout", {})[0], 200)
+        status, logged_in, _ = self.client.request("POST", "/api/login", {
+            "login_type": "teacher", "username": teacher["username"],
+            "password": TEST_TEACHER_PASSWORD,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(logged_in["ok"])
+        self.assertNotIn("privacy_required", logged_in)
+
+        self.assertEqual(self.client.request("POST", "/api/logout", {})[0], 200)
+        status, logged_in_again, _ = self.client.request("POST", "/api/login", {
+            "login_type": "teacher", "username": teacher["username"],
+            "password": TEST_TEACHER_PASSWORD,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(logged_in_again["ok"])
+        self.assertNotIn("privacy_required", logged_in_again)
 
     def test_students_cannot_read_other_team_contents(self):
         teacher = self.client

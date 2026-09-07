@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS users (
     license_managed INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     last_login_at TEXT,
+    privacy_version_accepted TEXT,
+    privacy_accepted_at TEXT,
     initial_credentials_emailed_at TEXT,
     archived_at TEXT,
     created_at TEXT NOT NULL
@@ -521,10 +523,30 @@ class Database:
                 connection.execute("ALTER TABLE users ADD COLUMN license_managed INTEGER NOT NULL DEFAULT 0")
             if "email" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+            if "privacy_version_accepted" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN privacy_version_accepted TEXT")
+            if "privacy_accepted_at" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN privacy_accepted_at TEXT")
             if "initial_credentials_emailed_at" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN initial_credentials_emailed_at TEXT")
             if "archived_at" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN archived_at TEXT")
+            # Bestehende protokollierte Kenntnisnahmen werden am Konto gespiegelt.
+            # So bleibt der Login auch dann stabil, wenn nur der Kontodatensatz
+            # für die schnelle Prüfung geladen wird; die Nachweistabelle bleibt erhalten.
+            connection.execute(
+                """UPDATE users SET
+                       privacy_version_accepted=(
+                         SELECT pa.privacy_version FROM privacy_acceptances pa
+                          WHERE pa.user_id=users.id ORDER BY pa.accepted_at DESC LIMIT 1
+                       ),
+                       privacy_accepted_at=(
+                         SELECT pa.accepted_at FROM privacy_acceptances pa
+                          WHERE pa.user_id=users.id ORDER BY pa.accepted_at DESC LIMIT 1
+                       )
+                     WHERE privacy_version_accepted IS NULL
+                       AND EXISTS(SELECT 1 FROM privacy_acceptances pa WHERE pa.user_id=users.id)"""
+            )
             task_columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)").fetchall()}
             if "is_milestone" not in task_columns:
                 connection.execute("ALTER TABLE tasks ADD COLUMN is_milestone INTEGER NOT NULL DEFAULT 0")

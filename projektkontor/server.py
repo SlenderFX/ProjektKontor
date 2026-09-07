@@ -743,7 +743,7 @@ class App:
         }
 
     def authenticated_login_result(self, user_id: int) -> Any:
-        account = self.db.one("SELECT role,is_owner,must_change_password FROM users WHERE id=? AND active=1", (user_id,))
+        account = self.db.one("SELECT role,is_owner,must_change_password,privacy_version_accepted FROM users WHERE id=? AND active=1", (user_id,))
         if account and account["role"] == "teacher" and not account.get("is_owner") and not self.teacher_license_valid(user_id):
             raise HttpError(403, "Dieser Lehrkraftzugang ist noch nicht freigeschaltet. Bitte wenden Sie sich an die ProjektKontor-Verwaltung.")
         if account and account["role"] == "teacher" and not account.get("is_owner") and account.get("must_change_password"):
@@ -753,7 +753,12 @@ class App:
                 connection.execute("DELETE FROM pending_logins WHERE user_id=? OR expires_at<=?", (user_id, utcnow()))
                 connection.execute("INSERT INTO pending_logins(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)", (hash_session_token(token, self.secret), user_id, expires_at, utcnow()))
             return {"password_change_required": True, "password_change_token": token}
-        accepted = self.db.one("SELECT 1 ok FROM privacy_acceptances WHERE user_id=? AND privacy_version=?", (user_id, PRIVACY_VERSION))
+        accepted = account and account.get("privacy_version_accepted") == PRIVACY_VERSION
+        if not accepted:
+            audit_acceptance = self.db.one("SELECT accepted_at FROM privacy_acceptances WHERE user_id=? AND privacy_version=?", (user_id, PRIVACY_VERSION))
+            accepted = bool(audit_acceptance)
+            if audit_acceptance:
+                self.db.execute("UPDATE users SET privacy_version_accepted=?,privacy_accepted_at=? WHERE id=?", (PRIVACY_VERSION,audit_acceptance["accepted_at"],user_id))
         if not accepted:
             token = new_session_token()
             expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(timespec="seconds")
@@ -776,7 +781,9 @@ class App:
             if not pending:
                 raise HttpError(401, "Die Bestätigung ist abgelaufen. Bitte melden Sie sich erneut an.")
             user_id = int(pending["user_id"])
-            connection.execute("INSERT OR REPLACE INTO privacy_acceptances(user_id,privacy_version,accepted_at) VALUES(?,?,?)", (user_id, PRIVACY_VERSION, utcnow()))
+            accepted_at=utcnow()
+            connection.execute("INSERT OR REPLACE INTO privacy_acceptances(user_id,privacy_version,accepted_at) VALUES(?,?,?)", (user_id, PRIVACY_VERSION, accepted_at))
+            connection.execute("UPDATE users SET privacy_version_accepted=?,privacy_accepted_at=? WHERE id=?", (PRIVACY_VERSION,accepted_at,user_id))
             connection.execute("DELETE FROM pending_logins WHERE token_hash=?", (token_hash,))
             connection.execute("UPDATE users SET last_login_at=? WHERE id=?", (utcnow(), user_id))
         session_token, csrf, max_age = self.start_session(user_id)
