@@ -271,6 +271,46 @@ class AppFlowTest(unittest.TestCase):
             [(lena["id"], project_task_id), (markus["id"], team_task["ids"][0])],
         )
 
+        # Unverändertes Speichern einer Zuweisung darf keine zweite Nachricht erzeugen.
+        self.assertEqual(self.client.request("POST", f"/api/tasks/{team_task['ids'][0]}/assignees", {"user_ids": [markus["id"]]})[0], 200)
+        self.assertEqual(self.app.db.one("SELECT COUNT(*) count FROM notifications WHERE task_id=?", (team_task["ids"][0],))["count"], 1)
+
+        status, _, _ = self.client.request("PATCH", f"/api/tasks/{project_task_id}", {
+            "title": "Projektauftrag verbindlich prüfen", "description": "Mit Checkliste",
+            "weight": 5, "start_at": "2026-09-18T09:00", "due_at": "2026-09-20T15:30",
+            "is_milestone": True, "requires_final_approval": False,
+        })
+        self.assertEqual(status, 200)
+        changed = self.app.db.one("SELECT * FROM tasks WHERE id=?", (project_task_id,))
+        self.assertEqual(changed["title"], "Projektauftrag verbindlich prüfen")
+        self.assertEqual(changed["weight"], 5)
+        self.assertEqual(changed["due_at"], "2026-09-20T15:30")
+        self.assertEqual(changed["is_milestone"], 1)
+        self.assertEqual(changed["requires_final_approval"], 0)
+
+        status, invalid_dates, _ = self.client.request("PATCH", f"/api/tasks/{project_task_id}", {
+            "start_at": "2026-09-22T09:00", "due_at": "2026-09-20T15:30",
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("nicht vor", invalid_dates["error"])
+        upload_status, upload, _ = self.client.request("POST", f"/api/tasks/{team_task['ids'][0]}/uploads", {
+            "name": "notiz.pdf", "media_type": "application/pdf",
+            "file_base64": base64.b64encode(b"%PDF-task-note").decode(),
+        })
+        self.assertEqual(upload_status, 200)
+        stored_upload = self.app.db.one("SELECT stored_name FROM uploads WHERE id=?", (upload["id"],))["stored_name"]
+        self.assertTrue((self.app.config.upload_dir / stored_upload).exists())
+        status, _, _ = self.client.request("DELETE", f"/api/tasks/{team_task['ids'][0]}")
+        self.assertEqual(status, 200)
+        self.assertIsNone(self.app.db.one("SELECT id FROM tasks WHERE id=?", (team_task["ids"][0],)))
+        self.assertFalse((self.app.config.upload_dir / stored_upload).exists())
+
+        # Entfernte Projektmitglieder dürfen nicht als unsichtbare Zuständigkeit zurückbleiben.
+        self.assertEqual(self.client.request("POST", f"/api/tasks/{project_task_id}/assignees", {"user_ids": [markus["id"]]})[0], 200)
+        self.assertEqual(self.client.request("DELETE", f"/api/teams/{team['id']}/members/{markus['id']}")[0], 200)
+        self.assertEqual(self.client.request("DELETE", f"/api/projects/{project['id']}/members/{markus['id']}")[0], 200)
+        self.assertIsNone(self.app.db.one("SELECT 1 ok FROM task_assignees WHERE task_id=? AND user_id=?", (project_task_id, markus["id"])))
+
     def test_dashboard_search_milestones_workload_and_dependencies(self):
         self.setup_teacher()
         _, bootstrap, _ = self.client.request("GET", "/api/bootstrap")
@@ -434,6 +474,24 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn("deaktiviert", forbidden_team["error"])
         status, _, _ = student.request("POST", f"/api/tasks/{task_id}/assignees", {"user_ids": [markus["id"]]})
         self.assertEqual(status, 403)
+        self.assertEqual(student.request("PATCH", f"/api/tasks/{task_id}", {"title": "Unzulässig umbenannt"})[0], 403)
+        self.assertEqual(student.request("PATCH", f"/api/tasks/{task_id}", {"requires_final_approval": False})[0], 403)
+        self.assertEqual(student.request("PATCH", f"/api/tasks/{task_id}", {"status_key": "revision", "blocked_reason": "Selbst gesetzt"})[0], 403)
+
+        self.assertEqual(teacher.request("POST", f"/api/teams/{team['id']}/members", {
+            "user_id": markus["id"], "is_lead": True, "business_role": "Koordination",
+        })[0], 200)
+        status, lead_task, _ = student.request("POST", f"/api/projects/{project['id']}/tasks", {
+            "title": "Lieferung koordinieren", "team_ids": [team["id"]],
+            "requires_final_approval": False, "due_at": "2026-08-10",
+        })
+        self.assertEqual(status, 200)
+        lead_task_id = lead_task["ids"][0]
+        self.assertEqual(self.app.db.one("SELECT requires_final_approval FROM tasks WHERE id=?", (lead_task_id,))["requires_final_approval"], 1)
+        self.assertEqual(student.request("PATCH", f"/api/tasks/{lead_task_id}", {"title": "Lieferung neu koordinieren"})[0], 200)
+        self.assertEqual(student.request("POST", f"/api/tasks/{lead_task_id}/assignees", {"user_ids": [markus["id"]]})[0], 200)
+        self.assertEqual(student.request("POST", f"/api/tasks/{lead_task_id}/dependencies", {"depends_on_ids": [task_id]})[0], 200)
+        self.assertEqual(student.request("PATCH", f"/api/tasks/{lead_task_id}", {"status_key": "done"})[0], 403)
 
         teacher.request("PATCH", f"/api/projects/{project['id']}", {"allow_student_organization": True})
         status, proposed_team, _ = student.request("POST", f"/api/projects/{project['id']}/teams", {

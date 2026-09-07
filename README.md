@@ -8,7 +8,9 @@ Dashboard ergänzt ein projektübergreifendes Portfolio, Kalender, Meilensteine,
 Aufgabenabhängigkeiten, Auslastung, globale Suche und lokal gespeicherte
 Aufgabenfilter. Teamleitungen erhalten eine eigene Verteilansicht;
 Fristverlängerungen, moderierbare Kommentare und projektbezogene
-Schülerorganisation sind im Aufgabenablauf integriert.
+Schülerorganisation sind im Aufgabenablauf integriert. Aufgaben lassen sich
+nach der Anlage vollständig weiterplanen, neu zuweisen und über direkte Links
+aus Dashboard, Suche, Kalender und Hinweisen öffnen.
 
 ## Lokal starten
 

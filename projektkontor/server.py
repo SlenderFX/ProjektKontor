@@ -168,6 +168,18 @@ def normalize_due_at(value: Any) -> str | None:
         raise HttpError(400, "Die Fälligkeit ist ungültig.") from exc
 
 
+def comparable_datetime(value: str) -> datetime:
+    parsed=datetime.fromisoformat(value)
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def parse_id_list(value: Any, field: str) -> list[int]:
+    if value is None:return []
+    if not isinstance(value,list):raise HttpError(400,f"{field} ist ungültig.")
+    try:return list(dict.fromkeys(int(item) for item in value if str(item).strip()))
+    except (TypeError,ValueError):raise HttpError(400,f"{field} ist ungültig.")
+
+
 class App:
     def __init__(self, config: Config):
         self.config = config
@@ -259,6 +271,7 @@ class App:
         route("DELETE", r"/api/teams/(?P<team_id>\d+)/members/(?P<user_id>\d+)")(self.remove_team_member)
         route("POST", r"/api/projects/(?P<project_id>\d+)/tasks")(self.create_task)
         route("PATCH", r"/api/tasks/(?P<task_id>\d+)")(self.update_task)
+        route("DELETE", r"/api/tasks/(?P<task_id>\d+)")(self.delete_task)
         route("POST", r"/api/tasks/(?P<task_id>\d+)/assignees")(self.set_task_assignees)
         route("POST", r"/api/tasks/(?P<task_id>\d+)/dependencies")(self.set_task_dependencies)
         route("POST", r"/api/tasks/(?P<task_id>\d+)/deadline-requests")(self.create_deadline_request)
@@ -3063,7 +3076,7 @@ class App:
             result["end_at"] = None
         result["class_name"] = self.db.one("SELECT name FROM classes WHERE id=?",(project["class_id"],))["name"]
         result["can_manage"] = self.can_manage_project(user, project)
-        result["members"] = self.db.all("""SELECT u.id,u.first_name,u.username,u.role, EXISTS(SELECT 1 FROM team_members tm JOIN teams t ON t.id=tm.team_id WHERE t.project_id=? AND tm.user_id=u.id) has_team FROM project_members pm JOIN users u ON u.id=pm.user_id WHERE pm.project_id=? ORDER BY u.first_name""",(project_id,project_id))
+        result["members"] = self.db.all("""SELECT u.id,u.first_name,u.username,u.role, EXISTS(SELECT 1 FROM team_members tm JOIN teams t ON t.id=tm.team_id WHERE t.project_id=? AND tm.user_id=u.id) has_team FROM project_members pm JOIN users u ON u.id=pm.user_id WHERE pm.project_id=? AND u.active=1 ORDER BY u.first_name""",(project_id,project_id))
         result["class_students"] = self.db.all(
             """SELECT u.id,u.first_name,u.username,
                t.id team_id,t.name team_name,COALESCE(tm.is_lead,0) is_lead
@@ -3077,7 +3090,7 @@ class App:
         )
         result["teams"] = self.db.all("""SELECT t.*, (SELECT COUNT(*) FROM team_members tm WHERE tm.team_id=t.id) member_count FROM teams t WHERE t.project_id=? ORDER BY t.status,name""",(project_id,))
         for team in result["teams"]:
-            team["members"] = self.db.all("""SELECT u.id,u.first_name,u.username,tm.is_lead,tm.business_role FROM team_members tm JOIN users u ON u.id=tm.user_id WHERE tm.team_id=? ORDER BY tm.is_lead DESC,u.first_name""",(team["id"],))
+            team["members"] = self.db.all("""SELECT u.id,u.first_name,u.username,tm.is_lead,tm.business_role FROM team_members tm JOIN users u ON u.id=tm.user_id WHERE tm.team_id=? AND u.active=1 ORDER BY tm.is_lead DESC,u.first_name""",(team["id"],))
         result["phases"] = self.db.all("SELECT * FROM phases WHERE project_id=? ORDER BY sort_order,id",(project_id,))
         result["statuses"] = self.db.all("SELECT * FROM task_statuses WHERE project_id=? AND active=1 ORDER BY sort_order",(project_id,))
         visible_team_ids = [row["team_id"] for row in self.db.all("SELECT team_id FROM team_members WHERE user_id=? AND team_id IN (SELECT id FROM teams WHERE project_id=? AND status!='rejected')", (user["id"], project_id))]
@@ -3089,7 +3102,7 @@ class App:
             task_scope_sql, task_scope_params = " AND t.team_id IS NULL", []
         result["tasks"] = self.db.all(f"""SELECT t.*,tm.name team_name,ph.name phase_name,s.label status_label,s.color status_color,s.system_kind FROM tasks t LEFT JOIN teams tm ON tm.id=t.team_id LEFT JOIN phases ph ON ph.id=t.phase_id LEFT JOIN task_statuses s ON s.project_id=t.project_id AND s.key=t.status_key WHERE t.project_id=?{task_scope_sql} ORDER BY t.created_at""", tuple([project_id] + task_scope_params))
         for task in result["tasks"]:
-            task["assignees"]=self.db.all("SELECT u.id,u.first_name FROM task_assignees a JOIN users u ON u.id=a.user_id WHERE a.task_id=? ORDER BY u.first_name",(task["id"],))
+            task["assignees"]=self.db.all("SELECT u.id,u.first_name FROM task_assignees a JOIN users u ON u.id=a.user_id WHERE a.task_id=? AND u.active=1 ORDER BY u.first_name",(task["id"],))
             task["dependencies"]=self.db.all(
                 """SELECT dependency.id depends_on_id,dependency.title,dependency.status_key
                      FROM task_dependencies relation JOIN tasks dependency ON dependency.id=relation.depends_on_id
@@ -3160,7 +3173,7 @@ class App:
 
     def add_project_member(self,environ,user,project_id):
         user,project=self.project_access(user,project_id,manage=True); member_id=int(self.body(environ).get("user_id") or 0)
-        account=self.db.one("SELECT * FROM users WHERE id=? AND class_id=?",(member_id,project["class_id"]))
+        account=self.db.one("SELECT * FROM users WHERE id=? AND class_id=? AND active=1",(member_id,project["class_id"]))
         if not account: raise HttpError(400,"Person gehört nicht zur Projektklasse")
         self.db.execute("INSERT OR IGNORE INTO project_members(project_id,user_id,joined_at) VALUES(?,?,?)",(project_id,member_id,utcnow()))
         return {"ok":True}
@@ -3171,7 +3184,10 @@ class App:
             raise HttpError(409,"Gesamtprojektleitung und Geschäftsführung können nicht entfernt werden")
         if self.db.one("SELECT 1 ok FROM team_members tm JOIN teams t ON t.id=tm.team_id WHERE t.project_id=? AND tm.user_id=?",(project_id,user_id)):
             raise HttpError(409,"Entfernen Sie die Person zuerst aus ihrem Projektteam")
-        self.db.execute("DELETE FROM project_members WHERE project_id=? AND user_id=?",(project_id,user_id))
+        with self.db.transaction() as connection:
+            connection.execute("DELETE FROM task_assignees WHERE user_id=? AND task_id IN (SELECT id FROM tasks WHERE project_id=?)",(user_id,project_id))
+            connection.execute("DELETE FROM project_members WHERE project_id=? AND user_id=?",(project_id,user_id))
+            Database.event(connection,project_id,user["id"],"project.member_removed","Ein Projektmitglied wurde entfernt; offene Zuständigkeiten wurden gelöst.")
         return {"ok":True}
 
     def create_phase(self,environ,user,project_id):
@@ -3290,8 +3306,17 @@ class App:
         return bool(team_id and self.db.one("SELECT 1 ok FROM team_members WHERE team_id=? AND user_id=? AND is_lead=1",(team_id,user["id"])))
 
     def create_task(self,environ,user,project_id):
-        user,project=self.project_access(user,project_id); data=self.body(environ); team_ids=[int(x) for x in data.get("team_ids",[]) if int(x)]
-        if not team_ids and data.get("team_id"):team_ids=[int(data["team_id"])]
+        user,project=self.project_access(user,project_id); data=self.body(environ)
+        manager=self.can_manage_project(user,project)
+        try:
+            team_ids=parse_id_list(data.get("team_ids",[]),"Die Teamauswahl")
+            if not team_ids and data.get("team_id"):team_ids=[int(data["team_id"])]
+            assignee_ids=parse_id_list(data.get("assignee_ids",[]),"Die Auswahl der Verantwortlichen")
+            weight=int(data.get("weight",2))
+            phase_id=int(data.get("phase_id") or 0) or None
+        except (TypeError, ValueError):
+            raise HttpError(400,"Teams, Verantwortliche oder Umfang sind ungültig.")
+        if weight not in {1,2,3,5}:raise HttpError(400,"Ungültiger Aufgabenumfang.")
         team_ids=list(dict.fromkeys(team_ids))
         if team_ids:
             placeholders=",".join("?" for _ in team_ids)
@@ -3301,10 +3326,8 @@ class App:
             )["count"]
             if valid_teams!=len(team_ids):raise HttpError(400,"Mindestens ein ausgewähltes Team gehört nicht zum aktiven Projekt")
         if not all(self.can_create_task(user,project_id,team_id) for team_id in (team_ids or [None])):raise HttpError(403,"Nur Teamleitungen dürfen Aufgaben für ihr Team erstellen")
-        assignee_ids=list(dict.fromkeys(int(x) for x in data.get("assignee_ids",[]) if int(x)))
         if len(team_ids)>1 and assignee_ids:
             raise HttpError(400,"Bei einer Aufgabe für mehrere Teams werden Verantwortliche anschließend je Teamkopie zugeordnet")
-        phase_id=int(data.get("phase_id") or 0) or None
         if phase_id:
             phase=self.db.one("SELECT * FROM phases WHERE id=? AND project_id=?",(phase_id,project_id))
             if not phase:raise HttpError(400,"Ungültige Phase")
@@ -3314,21 +3337,25 @@ class App:
         if len(title)>200:raise HttpError(400,"Der Aufgabentitel darf höchstens 200 Zeichen enthalten")
         if len(str(data.get("description","")))>20_000:raise HttpError(400,"Die Aufgabenbeschreibung darf höchstens 20.000 Zeichen enthalten")
         due_at = normalize_due_at(data.get("due_at"))
+        start_at = parse_datetime(data.get("start_at"), "Aufgabenbeginn") if data.get("start_at") else None
+        if start_at and due_at and comparable_datetime(due_at) < comparable_datetime(start_at):
+            raise HttpError(400,"Die Aufgabenfrist darf nicht vor dem Aufgabenbeginn liegen.")
         if data.get("is_milestone") and not due_at:
             raise HttpError(400, "Ein Meilenstein benötigt ein Fälligkeitsdatum.")
         with self.db.transaction() as connection:
             shared=len(team_ids)>1
             parent_id=None
             if shared:
-                cur=connection.execute("""INSERT INTO tasks(project_id,phase_id,title,description,status_key,weight,start_at,due_at,is_milestone,is_shared_parent,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)""",(project_id,phase_id,title,str(data.get("description","")),"open",int(data.get("weight",2)),data.get("start_at"),due_at,int(bool(data.get("is_milestone"))),user["id"],utcnow(),utcnow()));parent_id=cur.lastrowid
+                cur=connection.execute("""INSERT INTO tasks(project_id,phase_id,title,description,status_key,weight,start_at,due_at,is_milestone,is_shared_parent,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)""",(project_id,phase_id,title,str(data.get("description","")),"open",weight,start_at,due_at,int(bool(data.get("is_milestone"))),user["id"],utcnow(),utcnow()));parent_id=cur.lastrowid
             created=[]
             for team_id in (team_ids or [None]):
-                cur=connection.execute("""INSERT INTO tasks(project_id,parent_id,team_id,phase_id,title,description,status_key,weight,start_at,due_at,requires_final_approval,is_milestone,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(project_id,parent_id,team_id,phase_id,title,str(data.get("description","")),"open",int(data.get("weight",2)),data.get("start_at"),due_at,int(data.get("requires_final_approval",1)),int(bool(data.get("is_milestone"))),user["id"],utcnow(),utcnow()));created.append(cur.lastrowid)
+                requires_final_approval=bool(data.get("requires_final_approval",1)) if manager else True
+                cur=connection.execute("""INSERT INTO tasks(project_id,parent_id,team_id,phase_id,title,description,status_key,weight,start_at,due_at,requires_final_approval,is_milestone,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(project_id,parent_id,team_id,phase_id,title,str(data.get("description","")),"open",weight,start_at,due_at,int(requires_final_approval),int(bool(data.get("is_milestone"))),user["id"],utcnow(),utcnow()));created.append(cur.lastrowid)
                 for assignee_id in assignee_ids:
                     if team_id:
-                        allowed=connection.execute("SELECT 1 FROM team_members WHERE team_id=? AND user_id=?",(team_id,assignee_id)).fetchone()
+                        allowed=connection.execute("SELECT 1 FROM team_members tm JOIN users u ON u.id=tm.user_id WHERE tm.team_id=? AND tm.user_id=? AND u.active=1",(team_id,assignee_id)).fetchone()
                     else:
-                        allowed=connection.execute("SELECT 1 FROM project_members WHERE project_id=? AND user_id=?",(project_id,assignee_id)).fetchone()
+                        allowed=connection.execute("SELECT 1 FROM project_members pm JOIN users u ON u.id=pm.user_id WHERE pm.project_id=? AND pm.user_id=? AND u.active=1",(project_id,assignee_id)).fetchone()
                     if not allowed:raise HttpError(400,"Verantwortliche müssen dem gewählten Team oder Projekt angehören")
                     connection.execute("INSERT INTO task_assignees(task_id,user_id,assigned_at) VALUES(?,?,?)",(cur.lastrowid,assignee_id,utcnow()))
                     connection.execute("INSERT INTO notifications(user_id,project_id,task_id,message,created_at) VALUES(?,?,?,?,?)",(assignee_id,project_id,cur.lastrowid,f"Ihnen wurde die Aufgabe „{title}“ zugewiesen.",utcnow()))
@@ -3345,13 +3372,31 @@ class App:
         team_lead=task["team_id"] and self.db.one("SELECT 1 ok FROM team_members WHERE team_id=? AND user_id=? AND is_lead=1",(task["team_id"],user["id"]))
         assignee=self.db.one("SELECT 1 ok FROM task_assignees WHERE task_id=? AND user_id=?",(task_id,user["id"]))
         if not (manager or team_lead or assignee):raise HttpError(403,"Sie dürfen diese Aufgabe nicht bearbeiten")
+        leadership_fields={"title","description","weight","start_at","due_at","phase_id","is_milestone"}
+        if not(manager or team_lead) and leadership_fields.intersection(data):raise HttpError(403,"Nur Team- oder Projektleitungen dürfen die Aufgabenplanung ändern")
+        if "requires_final_approval" in data and not manager:raise HttpError(403,"Nur die Gesamtprojektleitung darf den Freigabeweg ändern")
+        if task["status_key"]=="done" and not manager:raise HttpError(403,"Eine freigegebene Aufgabe kann nur durch die Gesamtprojektleitung geändert werden")
         status=data.get("status_key")
         if status is not None and not self.db.one("SELECT 1 ok FROM task_statuses WHERE project_id=? AND key=? AND active=1", (task["project_id"], status)):
             raise HttpError(400, "Ungültiger Aufgabenstatus")
-        if "phase_id" in data and data.get("phase_id") and not self.db.one("SELECT 1 ok FROM phases WHERE id=? AND project_id=?", (int(data["phase_id"]), task["project_id"])):
-            raise HttpError(400, "Ungültige Projektphase")
-        if status=="approval" and not team_lead and not manager:raise HttpError(403,"Vor der Freigabe ist eine Teamprüfung erforderlich")
-        if status=="done" and not (manager or team_lead):raise HttpError(403,"Nur Leitungsrollen dürfen freigeben")
+        if "phase_id" in data:
+            try: data["phase_id"]=int(data["phase_id"]) if data.get("phase_id") else None
+            except (TypeError,ValueError):raise HttpError(400,"Ungültige Projektphase")
+            target_phase=self.db.one("SELECT * FROM phases WHERE id=? AND project_id=?",(data["phase_id"],task["project_id"])) if data["phase_id"] else None
+            if data["phase_id"] and not target_phase:raise HttpError(400,"Ungültige Projektphase")
+            if target_phase and target_phase["locked"] and data["phase_id"]!=task["phase_id"]:raise HttpError(409,"Diese Projektphase ist gesperrt")
+        if "title" in data and not str(data.get("title") or "").strip():raise HttpError(400,"Aufgabentitel fehlt")
+        if "weight" in data:
+            try: weight=int(data["weight"])
+            except (TypeError,ValueError):raise HttpError(400,"Ungültiger Aufgabenumfang.")
+            if weight not in {1,2,3,5}:raise HttpError(400,"Ungültiger Aufgabenumfang.")
+            data["weight"]=weight
+        if "start_at" in data:data["start_at"]=parse_datetime(data["start_at"],"Aufgabenbeginn") if data["start_at"] else None
+        if "due_at" in data:data["due_at"]=normalize_due_at(data["due_at"])
+        next_start=data.get("start_at",task.get("start_at"));next_due=data.get("due_at",task.get("due_at"))
+        if next_start and next_due and comparable_datetime(next_due)<comparable_datetime(next_start):raise HttpError(400,"Die Aufgabenfrist darf nicht vor dem Aufgabenbeginn liegen.")
+        if status=="approval" and status!=task["status_key"] and not team_lead and not manager:raise HttpError(403,"Vor der Freigabe ist eine Teamprüfung erforderlich")
+        if status in {"revision","done"} and status!=task["status_key"] and not (manager or team_lead):raise HttpError(403,"Nur Leitungsrollen dürfen diesen Status vergeben")
         if status=="done" and task["requires_final_approval"] and not manager:
             raise HttpError(403,"Diese Aufgabe benötigt die Freigabe der Gesamtprojektleitung oder Geschäftsführung")
         if status == "done" and self.db.one(
@@ -3366,24 +3411,52 @@ class App:
             (task_id,),
         ):
             raise HttpError(409, "Die Aufgabe kann nicht wieder geöffnet werden, solange eine abhängige Folgeaufgabe bereits erledigt ist.")
-        if data.get("is_milestone") and not (data.get("due_at") or task.get("due_at")):
+        next_milestone=bool(data.get("is_milestone",task.get("is_milestone")))
+        if next_milestone and not next_due:
             raise HttpError(400, "Ein Meilenstein benötigt ein Fälligkeitsdatum.")
         if status in {"blocked","revision"} and not str(data.get("blocked_reason",task["blocked_reason"])).strip():raise HttpError(400,"Bitte geben Sie einen Grund an")
         fields=[];params=[]
         allowed=("title","description","result_text","status_key","weight","start_at","due_at","phase_id","blocked_reason","is_milestone") if (manager or team_lead) else ("result_text","status_key","blocked_reason")
+        if manager:allowed+=("requires_final_approval",)
         limits={"title":200,"description":20_000,"result_text":20_000,"blocked_reason":4_000}
         for key in allowed:
             if key in data:
                 if key in limits and len(str(data[key] or ""))>limits[key]:raise HttpError(400,"Der eingegebene Text ist zu lang")
                 fields.append(f"{key}=?")
-                if key == "due_at":
-                    params.append(normalize_due_at(data[key]))
-                else:
-                    params.append(int(bool(data[key])) if key == "is_milestone" else data[key] or None if key=="phase_id" else data[key])
-        if fields:self.db.execute(f"UPDATE tasks SET {','.join(fields)},updated_at=? WHERE id=?",tuple(params+[utcnow(),task_id]))
-        if status in {"blocked","approval","revision","done"}:
+                value=str(data[key]).strip() if key=="title" else data[key]
+                params.append(int(bool(value)) if key in {"is_milestone","requires_final_approval"} else value or None if key=="phase_id" else value)
+        if fields:
+            with self.db.transaction() as connection:
+                connection.execute(f"UPDATE tasks SET {','.join(fields)},updated_at=? WHERE id=?",tuple(params+[utcnow(),task_id]))
+                Database.event(connection,task["project_id"],user["id"],"task.updated",f"Aufgabe „{task['title']}“ wurde aktualisiert.")
+        if status in {"blocked","approval","revision","done"} and status!=task["status_key"]:
             message={"blocked":"Aufgabe wurde als blockiert gemeldet.","approval":"Aufgabe wartet auf Freigabe.","revision":"Aufgabe wurde zur Überarbeitung zurückgegeben.","done":"Aufgabe wurde freigegeben."}[status]
             self.notify_leads(task["project_id"],task_id,message)
+        return {"ok":True}
+
+    def delete_task(self,environ,user,task_id):
+        task=self.db.one("SELECT * FROM tasks WHERE id=?",(task_id,))
+        if not task:raise HttpError(404,"Aufgabe nicht gefunden")
+        user,project=self.task_scope_access(user,task)
+        manager=self.can_manage_project(user,project)
+        team_lead=bool(task["team_id"] and self.db.one("SELECT 1 ok FROM team_members WHERE team_id=? AND user_id=? AND is_lead=1",(task["team_id"],user["id"])))
+        if not(manager or team_lead):raise HttpError(403,"Nur Team- oder Projektleitungen dürfen Aufgaben löschen.")
+        if task["status_key"]=="done" and not manager:raise HttpError(403,"Freigegebene Aufgaben dürfen nur durch die Gesamtprojektleitung gelöscht werden.")
+        phase=self.db.one("SELECT locked FROM phases WHERE id=?",(task["phase_id"],)) if task["phase_id"] else None
+        if phase and phase["locked"]:raise HttpError(409,"Aufgaben einer gesperrten Projektphase können nicht gelöscht werden.")
+        if self.db.one("""SELECT 1 ok FROM task_dependencies relation JOIN tasks successor ON successor.id=relation.task_id
+                           WHERE relation.depends_on_id=? AND successor.status_key='done' LIMIT 1""",(task_id,)):
+            raise HttpError(409,"Die Aufgabe kann nicht gelöscht werden, weil eine abhängige Folgeaufgabe bereits erledigt ist.")
+        parent_id=task.get("parent_id")
+        upload_names=[row["stored_name"] for row in self.db.all("SELECT stored_name FROM uploads WHERE task_id=?",(task_id,))]
+        with self.db.transaction() as connection:
+            connection.execute("DELETE FROM tasks WHERE id=?",(task_id,))
+            if parent_id and not connection.execute("SELECT 1 FROM tasks WHERE parent_id=?",(parent_id,)).fetchone():
+                connection.execute("DELETE FROM tasks WHERE id=?",(parent_id,))
+            Database.event(connection,task["project_id"],user["id"],"task.deleted",f"Aufgabe „{task['title']}“ wurde gelöscht.")
+        for stored_name in upload_names:
+            try:(self.config.upload_dir/stored_name).unlink(missing_ok=True)
+            except OSError as error:warnings.warn(f"Aufgabendatei konnte nach dem Löschen nicht entfernt werden: {stored_name}: {error}")
         return {"ok":True}
 
     def notify_leads(self,project_id,task_id,message):
@@ -3397,22 +3470,29 @@ class App:
     def set_task_assignees(self,environ,user,task_id):
         task=self.db.one("SELECT * FROM tasks WHERE id=?",(task_id,));
         if not task:raise HttpError(404,"Aufgabe nicht gefunden")
-        user,project=self.task_scope_access(user,task); data=self.body(environ);ids=[int(x) for x in data.get("user_ids",[])]
+        user,project=self.task_scope_access(user,task); data=self.body(environ)
+        ids=parse_id_list(data.get("user_ids",[]),"Die Auswahl der Verantwortlichen")
         manager=self.can_manage_project(user, project)
         team_lead=task["team_id"] and self.db.one("SELECT 1 ok FROM team_members WHERE team_id=? AND user_id=? AND is_lead=1",(task["team_id"],user["id"]))
         if not(manager or team_lead):raise HttpError(403,"Nur Team- oder Projektleitungen dürfen Aufgaben verteilen")
         with self.db.transaction() as connection:
+            previous={row[0] for row in connection.execute("SELECT user_id FROM task_assignees WHERE task_id=?",(task_id,)).fetchall()}
             connection.execute("DELETE FROM task_assignees WHERE task_id=?",(task_id,))
-            for uid in set(ids):
-                if task["team_id"] and not connection.execute("SELECT 1 FROM team_members WHERE team_id=? AND user_id=?",(task["team_id"],uid)).fetchone():raise HttpError(400,"Verantwortliche müssen dem Team angehören")
-                if not task["team_id"] and not connection.execute("SELECT 1 FROM project_members WHERE project_id=? AND user_id=?", (task["project_id"], uid)).fetchone():raise HttpError(400,"Verantwortliche müssen dem Projekt angehören")
-                connection.execute("INSERT INTO task_assignees(task_id,user_id,assigned_at) VALUES(?,?,?)",(task_id,uid,utcnow()));connection.execute("INSERT INTO notifications(user_id,project_id,task_id,message,created_at) VALUES(?,?,?,?,?)",(uid,task["project_id"],task_id,f"Ihnen wurde die Aufgabe „{task['title']}“ zugewiesen." ,utcnow()))
+            for uid in ids:
+                if task["team_id"] and not connection.execute("SELECT 1 FROM team_members tm JOIN users u ON u.id=tm.user_id WHERE tm.team_id=? AND tm.user_id=? AND u.active=1",(task["team_id"],uid)).fetchone():raise HttpError(400,"Verantwortliche müssen dem Team angehören")
+                if not task["team_id"] and not connection.execute("SELECT 1 FROM project_members pm JOIN users u ON u.id=pm.user_id WHERE pm.project_id=? AND pm.user_id=? AND u.active=1", (task["project_id"], uid)).fetchone():raise HttpError(400,"Verantwortliche müssen dem Projekt angehören")
+                connection.execute("INSERT INTO task_assignees(task_id,user_id,assigned_at) VALUES(?,?,?)",(task_id,uid,utcnow()))
+                if uid not in previous:connection.execute("INSERT INTO notifications(user_id,project_id,task_id,message,created_at) VALUES(?,?,?,?,?)",(uid,task["project_id"],task_id,f"Ihnen wurde die Aufgabe „{task['title']}“ zugewiesen." ,utcnow()))
+            if set(ids)!=previous:Database.event(connection,task["project_id"],user["id"],"task.assigned",f"Zuständigkeit für „{task['title']}“ wurde aktualisiert.")
         return {"ok":True}
 
     def set_task_dependencies(self,environ,user,task_id):
         task=self.db.one("SELECT * FROM tasks WHERE id=?",(task_id,));
         if not task:raise HttpError(404,"Aufgabe nicht gefunden")
-        self.project_access(user,task["project_id"],manage=True);ids=list(dict.fromkeys(int(x) for x in self.body(environ).get("depends_on_ids",[]) if int(x)!=task_id))
+        user,project=self.task_scope_access(user,task);manager=self.can_manage_project(user,project);team_lead=bool(task["team_id"] and self.db.one("SELECT 1 ok FROM team_members WHERE team_id=? AND user_id=? AND is_lead=1",(task["team_id"],user["id"])))
+        if not(manager or team_lead):raise HttpError(403,"Nur Team- oder Projektleitungen dürfen Abhängigkeiten bearbeiten.")
+        ids=parse_id_list(self.body(environ).get("depends_on_ids",[]),"Die Auswahl der Vorgängeraufgaben")
+        if task_id in ids:raise HttpError(400,"Eine Aufgabe kann nicht von sich selbst abhängen.")
         if ids:
             placeholders = ",".join("?" for _ in ids)
             count = self.db.one(
@@ -3422,6 +3502,12 @@ class App:
             if count != len(ids):
                 raise HttpError(400, "Mindestens eine Vorgängeraufgabe gehört nicht zu diesem Projekt.")
             for dependency_id in ids:
+                dependency=self.db.one("SELECT * FROM tasks WHERE id=?",(dependency_id,))
+                if not manager:
+                    try:self.task_scope_access(user,dependency)
+                    except HttpError as error:
+                        if error.status in {403,404}:raise HttpError(403,"Eine ausgewählte Vorgängeraufgabe ist für Sie nicht zugänglich.")
+                        raise
                 cycle = self.db.one(
                     """WITH RECURSIVE predecessors(id) AS (
                            SELECT depends_on_id FROM task_dependencies WHERE task_id=?
@@ -3442,8 +3528,10 @@ class App:
                 if incomplete:
                     raise HttpError(409, "Eine erledigte Aufgabe darf nicht von offenen Vorgängeraufgaben abhängen.")
         with self.db.transaction() as connection:
+            previous={row[0] for row in connection.execute("SELECT depends_on_id FROM task_dependencies WHERE task_id=?",(task_id,)).fetchall()}
             connection.execute("DELETE FROM task_dependencies WHERE task_id=?",(task_id,))
             for dep in ids:connection.execute("INSERT INTO task_dependencies(task_id,depends_on_id) VALUES(?,?)",(task_id,dep))
+            if set(ids)!=previous:Database.event(connection,task["project_id"],user["id"],"task.dependencies_updated",f"Abhängigkeiten für „{task['title']}“ wurden aktualisiert.")
         return {"ok":True}
 
     def create_deadline_request(self,environ,user,task_id):
