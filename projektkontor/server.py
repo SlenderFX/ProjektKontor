@@ -3312,6 +3312,20 @@ class App:
         if self.can_manage_project(user, project):return True
         return bool(team_id and self.db.one("SELECT 1 ok FROM team_members WHERE team_id=? AND user_id=? AND is_lead=1",(team_id,user["id"])))
 
+    def occupied_task_teams(self,project_id,team_ids,start_at,due_at,exclude_task_id=None):
+        if not team_ids or not start_at or not due_at:return []
+        placeholders=",".join("?" for _ in team_ids)
+        rows=self.db.all(
+            f"""SELECT t.id,t.team_id,t.start_at,t.due_at,teams.name
+                  FROM tasks t JOIN teams ON teams.id=t.team_id
+                 WHERE t.project_id=? AND t.is_shared_parent=0
+                   AND t.team_id IN ({placeholders}) AND t.start_at IS NOT NULL AND t.due_at IS NOT NULL""",
+            (project_id,*team_ids),
+        )
+        start=comparable_datetime(start_at);end=comparable_datetime(due_at)
+        occupied={row["team_id"]:row["name"] for row in rows if row["id"]!=exclude_task_id and comparable_datetime(row["start_at"])<=end and comparable_datetime(row["due_at"])>=start}
+        return list(occupied.values())
+
     def create_task(self,environ,user,project_id):
         user,project=self.project_access(user,project_id); data=self.body(environ)
         manager=self.can_manage_project(user,project)
@@ -3319,6 +3333,9 @@ class App:
             team_ids=parse_id_list(data.get("team_ids",[]),"Die Teamauswahl")
             if not team_ids and data.get("team_id"):team_ids=[int(data["team_id"])]
             assignee_ids=parse_id_list(data.get("assignee_ids",[]),"Die Auswahl der Verantwortlichen")
+            raw_team_assignees=data.get("team_assignees") or {}
+            if not isinstance(raw_team_assignees,dict):raise ValueError
+            team_assignees={int(team_id):parse_id_list(ids,"Die Auswahl der Teammitglieder") for team_id,ids in raw_team_assignees.items()}
             weight=int(data.get("weight",2))
             phase_id=int(data.get("phase_id") or 0) or None
         except (TypeError, ValueError):
@@ -3333,6 +3350,8 @@ class App:
             )["count"]
             if valid_teams!=len(team_ids):raise HttpError(400,"Mindestens ein ausgewähltes Team gehört nicht zum aktiven Projekt")
         if not all(self.can_create_task(user,project_id,team_id) for team_id in (team_ids or [None])):raise HttpError(403,"Nur Teamleitungen dürfen Aufgaben für ihr Team erstellen")
+        if set(team_assignees)-set(team_ids):
+            raise HttpError(400,"Teammitglieder können nur einem ausgewählten Team zugeordnet werden")
         if len(team_ids)>1 and assignee_ids:
             raise HttpError(400,"Bei einer Aufgabe für mehrere Teams werden Verantwortliche anschließend je Teamkopie zugeordnet")
         if phase_id:
@@ -3349,6 +3368,9 @@ class App:
             raise HttpError(400,"Die Aufgabenfrist darf nicht vor dem Aufgabenbeginn liegen.")
         if data.get("is_milestone") and not due_at:
             raise HttpError(400, "Ein Meilenstein benötigt ein Fälligkeitsdatum.")
+        occupied=self.occupied_task_teams(project_id,team_ids,start_at,due_at)
+        if occupied:
+            raise HttpError(409,f"Im gewählten Zeitraum bereits belegt: {', '.join(sorted(occupied))}")
         with self.db.transaction() as connection:
             shared=len(team_ids)>1
             parent_id=None
@@ -3358,7 +3380,8 @@ class App:
             for team_id in (team_ids or [None]):
                 requires_final_approval=bool(data.get("requires_final_approval",1)) if manager else True
                 cur=connection.execute("""INSERT INTO tasks(project_id,parent_id,team_id,phase_id,title,description,status_key,weight,start_at,due_at,requires_final_approval,is_milestone,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(project_id,parent_id,team_id,phase_id,title,str(data.get("description","")),"open",weight,start_at,due_at,int(requires_final_approval),int(bool(data.get("is_milestone"))),user["id"],utcnow(),utcnow()));created.append(cur.lastrowid)
-                for assignee_id in assignee_ids:
+                selected_assignees=team_assignees.get(team_id,assignee_ids if len(team_ids)<=1 else []) if team_id else assignee_ids
+                for assignee_id in selected_assignees:
                     if team_id:
                         allowed=connection.execute("SELECT 1 FROM team_members tm JOIN users u ON u.id=tm.user_id WHERE tm.team_id=? AND tm.user_id=? AND u.active=1",(team_id,assignee_id)).fetchone()
                     else:
@@ -3402,6 +3425,8 @@ class App:
         if "due_at" in data:data["due_at"]=normalize_due_at(data["due_at"])
         next_start=data.get("start_at",task.get("start_at"));next_due=data.get("due_at",task.get("due_at"))
         if next_start and next_due and comparable_datetime(next_due)<comparable_datetime(next_start):raise HttpError(400,"Die Aufgabenfrist darf nicht vor dem Aufgabenbeginn liegen.")
+        occupied=self.occupied_task_teams(task["project_id"],[task["team_id"]] if task["team_id"] else [],next_start,next_due,task_id)
+        if occupied:raise HttpError(409,f"Das Team {occupied[0]} ist im gewählten Zeitraum bereits einer anderen Aufgabe zugewiesen.")
         if status=="approval" and status!=task["status_key"] and not team_lead and not manager:raise HttpError(403,"Vor der Freigabe ist eine Teamprüfung erforderlich")
         if status in {"revision","done"} and status!=task["status_key"] and not (manager or team_lead):raise HttpError(403,"Nur Leitungsrollen dürfen diesen Status vergeben")
         if status=="done" and task["requires_final_approval"] and not manager:

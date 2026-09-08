@@ -271,6 +271,45 @@ class AppFlowTest(unittest.TestCase):
             [(lena["id"], project_task_id), (markus["id"], team_task["ids"][0])],
         )
 
+        _, second_team, _ = self.client.request("POST", f"/api/projects/{project['id']}/teams", {
+            "name": "Vertrieb", "color": "#16A34A",
+            "member_ids": [lena["id"]], "lead_ids": [lena["id"]],
+        })
+        status, shared_task, _ = self.client.request("POST", f"/api/projects/{project['id']}/tasks", {
+            "title": "Gemeinsame Auswertung", "team_ids": [team["id"], second_team["id"]],
+            "team_assignees": {
+                str(team["id"]): [markus["id"]], str(second_team["id"]): [lena["id"]],
+            },
+            "start_at": "2026-10-01T08:00", "due_at": "2026-10-03T16:00",
+        })
+        self.assertEqual(status, 200)
+        shared_children = self.app.db.all(
+            "SELECT id,team_id,parent_id FROM tasks WHERE id IN (?,?) ORDER BY team_id",
+            tuple(shared_task["ids"]),
+        )
+        self.assertTrue(shared_task["shared_parent_id"])
+        self.assertEqual({row["parent_id"] for row in shared_children}, {shared_task["shared_parent_id"]})
+        assigned_by_team = {
+            row["team_id"]: self.app.db.one(
+                "SELECT user_id FROM task_assignees WHERE task_id=?", (row["id"],)
+            )["user_id"]
+            for row in shared_children
+        }
+        self.assertEqual(assigned_by_team, {team["id"]: markus["id"], second_team["id"]: lena["id"]})
+
+        status, occupied, _ = self.client.request("POST", f"/api/projects/{project['id']}/tasks", {
+            "title": "Zeitlich kollidierende Aufgabe", "team_ids": [team["id"]],
+            "start_at": "2026-10-02T09:00", "due_at": "2026-10-04T12:00",
+        })
+        self.assertEqual(status, 409)
+        self.assertIn("Einkauf", occupied["error"])
+        status, later_task, _ = self.client.request("POST", f"/api/projects/{project['id']}/tasks", {
+            "title": "Spätere Aufgabe", "team_ids": [team["id"]],
+            "start_at": "2026-10-04T09:00", "due_at": "2026-10-05T12:00",
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(later_task["ids"])
+
         # Unverändertes Speichern einer Zuweisung darf keine zweite Nachricht erzeugen.
         self.assertEqual(self.client.request("POST", f"/api/tasks/{team_task['ids'][0]}/assignees", {"user_ids": [markus["id"]]})[0], 200)
         self.assertEqual(self.app.db.one("SELECT COUNT(*) count FROM notifications WHERE task_id=?", (team_task["ids"][0],))["count"], 1)
