@@ -3239,16 +3239,28 @@ class App:
 
     def create_phase(self,environ,user,project_id):
         user,project=self.project_access(user,project_id,manage=True); data=self.body(environ)
-        phase_id=self.db.execute("""INSERT INTO phases(project_id,name,description,expected_result,start_at,end_at,sort_order,locked,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",(project_id,str(data.get("name","")).strip(),str(data.get("description","")),str(data.get("expected_result","")),parse_datetime(data.get("start_at"),"Start"),parse_datetime(data.get("end_at"),"Ende"),int(data.get("sort_order",0)),int(bool(data.get("locked"))),utcnow()))
+        name=str(data.get("name","")).strip();description=str(data.get("description",""));expected_result=str(data.get("expected_result",""))
+        if not name or len(name)>120: raise HttpError(400,"Der Phasenname muss 1 bis 120 Zeichen lang sein.")
+        if len(description)>20_000 or len(expected_result)>20_000: raise HttpError(400,"Beschreibung und erwartetes Ergebnis dürfen jeweils höchstens 20.000 Zeichen enthalten.")
+        start_at=parse_datetime(data.get("start_at"),"Start");end_at=parse_datetime(data.get("end_at"),"Ende")
+        if datetime.fromisoformat(end_at)<datetime.fromisoformat(start_at): raise HttpError(400,"Das Phasenende darf nicht vor dem Phasenstart liegen.")
+        phase_id=self.db.execute("""INSERT INTO phases(project_id,name,description,expected_result,start_at,end_at,sort_order,locked,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",(project_id,name,description,expected_result,start_at,end_at,int(data.get("sort_order",0)),int(bool(data.get("locked"))),utcnow()))
         return {"id":phase_id}
 
     def update_phase(self,environ,user,phase_id):
         phase=self.db.one("SELECT * FROM phases WHERE id=?",(phase_id,));
         if not phase: raise HttpError(404,"Phase nicht gefunden")
         self.project_access(user,phase["project_id"],manage=True); data=self.body(environ)
+        name=str(data.get("name",phase["name"])).strip();description=str(data.get("description",phase["description"]));expected_result=str(data.get("expected_result",phase["expected_result"]))
+        if not name or len(name)>120: raise HttpError(400,"Der Phasenname muss 1 bis 120 Zeichen lang sein.")
+        if len(description)>20_000 or len(expected_result)>20_000: raise HttpError(400,"Beschreibung und erwartetes Ergebnis dürfen jeweils höchstens 20.000 Zeichen enthalten.")
+        start_at=parse_datetime(data.get("start_at",phase["start_at"]),"Start");end_at=parse_datetime(data.get("end_at",phase["end_at"]),"Ende")
+        if datetime.fromisoformat(end_at)<datetime.fromisoformat(start_at): raise HttpError(400,"Das Phasenende darf nicht vor dem Phasenstart liegen.")
         fields=[];params=[]
         for key in ("name","description","expected_result","start_at","end_at","sort_order","locked"):
-            if key in data: fields.append(f"{key}=?");params.append(int(bool(data[key])) if key=="locked" else data[key])
+            if key in data:
+                value={"name":name,"description":description,"expected_result":expected_result,"start_at":start_at,"end_at":end_at}.get(key,data[key])
+                fields.append(f"{key}=?");params.append(int(bool(value)) if key=="locked" else value)
         if fields: self.db.execute(f"UPDATE phases SET {','.join(fields)} WHERE id=?",tuple(params+[phase_id]))
         return {"ok":True}
 

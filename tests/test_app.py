@@ -124,6 +124,26 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         project_id = project["id"]
 
+        status, phase, _ = self.client.request("POST", f"/api/projects/{project_id}/phases", {
+            "name": "Vorbereitung", "description": "Material beschaffen",
+            "expected_result": "Alles liegt vor", "start_at": "2026-07-16T08:00", "end_at": "2026-07-18T12:00",
+        })
+        self.assertEqual(status, 200)
+        status, _, _ = self.client.request("PATCH", f"/api/phases/{phase['id']}", {
+            "name": "Planung", "description": "Korrigierter Ablauf",
+            "expected_result": "Plan freigegeben", "start_at": "2026-07-17T09:00", "end_at": "2026-07-20T13:00",
+        })
+        self.assertEqual(status, 200)
+        saved_phase = self.app.db.one("SELECT * FROM phases WHERE id=?", (phase["id"],))
+        self.assertEqual(saved_phase["name"], "Planung")
+        self.assertEqual(saved_phase["start_at"], "2026-07-17T09:00")
+        status, invalid_phase, _ = self.client.request("PATCH", f"/api/phases/{phase['id']}", {
+            "start_at": "2026-07-22T09:00", "end_at": "2026-07-20T13:00",
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("nicht vor", invalid_phase["error"])
+        self.assertEqual(self.app.db.one("SELECT start_at FROM phases WHERE id=?", (phase["id"],))["start_at"], "2026-07-17T09:00")
+
         _, later_import, _ = self.client.request("POST", f"/api/classes/{class_id}/import", {
             "rows": [{"first_name": "Nora"}]
         })
