@@ -143,6 +143,25 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("nicht vor", invalid_phase["error"])
         self.assertEqual(self.app.db.one("SELECT start_at FROM phases WHERE id=?", (phase["id"],))["start_at"], "2026-07-17T09:00")
+        status, second_phase, _ = self.client.request("POST", f"/api/projects/{project_id}/phases", {
+            "name": "Durchführung", "start_at": "2026-07-20T13:00", "end_at": "2026-07-23T12:00",
+        })
+        self.assertEqual(status, 200)
+        self.assertGreater(
+            self.app.db.one("SELECT sort_order FROM phases WHERE id=?", (second_phase["id"],))["sort_order"],
+            self.app.db.one("SELECT sort_order FROM phases WHERE id=?", (phase["id"],))["sort_order"],
+        )
+        status, _, _ = self.client.request("POST", f"/api/projects/{project_id}/phases/reorder", {
+            "phase_ids": [second_phase["id"], phase["id"]],
+        })
+        self.assertEqual(status, 200)
+        reordered = self.app.db.all("SELECT id FROM phases WHERE project_id=? ORDER BY sort_order,id", (project_id,))
+        self.assertEqual([row["id"] for row in reordered], [second_phase["id"], phase["id"]])
+        status, invalid_order, _ = self.client.request("POST", f"/api/projects/{project_id}/phases/reorder", {
+            "phase_ids": [phase["id"]],
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("alle Projektphasen", invalid_order["error"])
 
         _, later_import, _ = self.client.request("POST", f"/api/classes/{class_id}/import", {
             "rows": [{"first_name": "Nora"}]

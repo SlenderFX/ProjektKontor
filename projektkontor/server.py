@@ -266,6 +266,7 @@ class App:
         route("POST", r"/api/projects/(?P<project_id>\d+)/members")(self.add_project_member)
         route("DELETE", r"/api/projects/(?P<project_id>\d+)/members/(?P<user_id>\d+)")(self.remove_project_member)
         route("POST", r"/api/projects/(?P<project_id>\d+)/phases")(self.create_phase)
+        route("POST", r"/api/projects/(?P<project_id>\d+)/phases/reorder")(self.reorder_phases)
         route("PATCH", r"/api/phases/(?P<phase_id>\d+)")(self.update_phase)
         route("POST", r"/api/projects/(?P<project_id>\d+)/teams")(self.create_team)
         route("PATCH", r"/api/teams/(?P<team_id>\d+)")(self.update_team)
@@ -3244,8 +3245,23 @@ class App:
         if len(description)>20_000 or len(expected_result)>20_000: raise HttpError(400,"Beschreibung und erwartetes Ergebnis dürfen jeweils höchstens 20.000 Zeichen enthalten.")
         start_at=parse_datetime(data.get("start_at"),"Start");end_at=parse_datetime(data.get("end_at"),"Ende")
         if datetime.fromisoformat(end_at)<datetime.fromisoformat(start_at): raise HttpError(400,"Das Phasenende darf nicht vor dem Phasenstart liegen.")
-        phase_id=self.db.execute("""INSERT INTO phases(project_id,name,description,expected_result,start_at,end_at,sort_order,locked,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",(project_id,name,description,expected_result,start_at,end_at,int(data.get("sort_order",0)),int(bool(data.get("locked"))),utcnow()))
+        next_order=self.db.one("SELECT COALESCE(MAX(sort_order),-1)+1 value FROM phases WHERE project_id=?",(project_id,))["value"]
+        phase_id=self.db.execute("""INSERT INTO phases(project_id,name,description,expected_result,start_at,end_at,sort_order,locked,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",(project_id,name,description,expected_result,start_at,end_at,int(data.get("sort_order",next_order)),int(bool(data.get("locked"))),utcnow()))
         return {"id":phase_id}
+
+    def reorder_phases(self,environ,user,project_id):
+        self.project_access(user,project_id,manage=True); data=self.body(environ)
+        raw_ids=data.get("phase_ids",[])
+        if not isinstance(raw_ids,list): raise HttpError(400,"Die Phasenreihenfolge ist ungültig.")
+        try: phase_ids=[int(value) for value in raw_ids]
+        except (TypeError,ValueError) as exc: raise HttpError(400,"Die Phasenreihenfolge ist ungültig.") from exc
+        existing=[row["id"] for row in self.db.all("SELECT id FROM phases WHERE project_id=?",(project_id,))]
+        if len(phase_ids)!=len(existing) or len(set(phase_ids))!=len(phase_ids) or set(phase_ids)!=set(existing):
+            raise HttpError(400,"Die Reihenfolge muss alle Projektphasen genau einmal enthalten.")
+        with self.db.transaction() as connection:
+            for sort_order,phase_id in enumerate(phase_ids):
+                connection.execute("UPDATE phases SET sort_order=? WHERE id=? AND project_id=?",(sort_order,phase_id,project_id))
+        return {"ok":True}
 
     def update_phase(self,environ,user,phase_id):
         phase=self.db.one("SELECT * FROM phases WHERE id=?",(phase_id,));
