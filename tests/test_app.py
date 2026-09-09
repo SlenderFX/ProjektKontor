@@ -415,6 +415,36 @@ class AppFlowTest(unittest.TestCase):
         _, users, _ = self.client.request("GET", f"/api/classes/{klass['id']}/users")
         self.assertEqual(users[0]["access_code"], imported["created"][0]["access_code"])
 
+    def test_teacher_can_print_personal_access_cards_for_a_class(self):
+        self.setup_teacher()
+        _, klass, _ = self.client.request("POST", "/api/classes", {"name": "KB25A"})
+        _, imported, _ = self.client.request("POST", f"/api/classes/{klass['id']}/import", {
+            "rows": [{"first_name": "Mia"}, {"first_name": "Noah"}],
+        })
+
+        status, document, headers = self.client.request("GET", f"/api/classes/{klass['id']}/access-cards")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(document.count(b'class="access-card"'), 2)
+        self.assertIn(b"Zugangskarten", document)
+        self.assertIn(b"Drucken / als PDF sichern", document)
+        self.assertIn(b"Benutzername", document)
+        self.assertIn(b"Zugangscode", document)
+        self.assertIn(b"Mia", document)
+        self.assertIn(b"Noah", document)
+        self.assertIn(imported["created"][0]["username"].encode(), document)
+        self.assertIn(imported["created"][0]["access_code"].encode(), document)
+        self.assertEqual(headers["Cache-Control"], "private, no-store")
+        self.assertIn("noindex", headers["X-Robots-Tag"])
+        self.assertTrue(headers["Content-Disposition"].startswith("inline;"))
+
+        self.client.request("POST", "/api/logout", {})
+        self.assertEqual(self.client.request("POST", "/api/login", {
+            "username": imported["created"][0]["username"],
+            "password": imported["created"][0]["access_code"],
+        })[0], 200)
+        self.assertEqual(self.client.request("GET", f"/api/classes/{klass['id']}/access-cards")[0], 403)
+
     def test_teacher_can_create_student_account_manually(self):
         self.setup_teacher()
         _, klass, _ = self.client.request("POST", "/api/classes", {"name": "KB26"})

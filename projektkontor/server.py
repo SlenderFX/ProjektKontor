@@ -4,6 +4,7 @@ import base64
 import calendar
 import hashlib
 import hmac
+import html
 import io
 import ipaddress
 import json
@@ -244,6 +245,7 @@ class App:
         route("PATCH", r"/api/classes/(?P<class_id>\d+)")(self.update_class)
         route("DELETE", r"/api/classes/(?P<class_id>\d+)")(self.delete_class)
         route("GET", r"/api/classes/(?P<class_id>\d+)/users")(self.list_class_users)
+        route("GET", r"/api/classes/(?P<class_id>\d+)/access-cards")(self.class_access_cards)
         route("POST", r"/api/classes/(?P<class_id>\d+)/users")(self.create_class_user)
         route("GET", r"/api/classes/(?P<class_id>\d+)/template")(self.download_account_template)
         route("POST", r"/api/classes/(?P<class_id>\d+)/import-preview")(self.import_preview)
@@ -2638,6 +2640,44 @@ class App:
         for row in rows:
             row["access_code"] = self.vault.decrypt(row.pop("credential"))
         return rows
+
+    def class_access_cards(self, environ, user, class_id):
+        self.require_class_access(user, class_id)
+        klass = self.db.one("SELECT id,name FROM classes WHERE id=? AND active=1", (class_id,))
+        if not klass:
+            raise HttpError(404, "Klasse nicht gefunden")
+        accounts = self.db.all(
+            "SELECT first_name,username,credential FROM users WHERE class_id=? AND role='student' AND active=1 ORDER BY first_name COLLATE NOCASE,username COLLATE NOCASE",
+            (class_id,),
+        )
+        cards = []
+        for account in accounts:
+            try:
+                access_code = self.vault.decrypt(account["credential"])
+            except (TypeError, ValueError):
+                access_code = "Code nicht verfügbar"
+            cards.append(f"""
+              <section class="access-card">
+                <header><span class="brand-mark">PK</span><span><strong>ProjektKontor</strong><small>Zugang für Klasse {html.escape(klass['name'])}</small></span></header>
+                <div class="student-name">{html.escape(account['first_name'])}</div>
+                <dl><div><dt>Benutzername</dt><dd>{html.escape(account['username'])}</dd></div><div><dt>Zugangscode</dt><dd>{html.escape(access_code)}</dd></div></dl>
+                <ol><li><span class="login-url">ProjektKontor im Browser öffnen</span></li><li>„Schüler“ auswählen</li><li>Benutzername und Zugangscode eingeben</li></ol>
+                <footer>Zugangsdaten nur für dich · nicht weitergeben</footer>
+              </section>
+            """)
+        if not cards:
+            cards.append('<section class="access-card empty"><strong>Diese Klasse besitzt noch keine aktiven Zugänge.</strong></section>')
+        document = f"""<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive,nosnippet"><title>ProjektKontor – Zugänge {html.escape(klass['name'])}</title>
+<link rel="stylesheet" href="/access-cards.css?v={__version__}"></head><body>
+<div class="print-toolbar"><div><strong>Zugangskarten · {html.escape(klass['name'])}</strong><span>{len(accounts)} Karten zum Ausschneiden und persönlichen Verteilen</span></div><button id="print" type="button">Drucken / als PDF sichern</button></div>
+<main class="print-sheet"><header class="sheet-heading"><div><span class="brand-mark">PK</span><span><strong>ProjektKontor</strong><small>Persönliche Schülerzugänge</small></span></div><p>Klasse {html.escape(klass['name'])} · je eine Karte pro Person</p></header><div class="access-grid">{''.join(cards)}</div></main>
+<script src="/print.js?v={__version__}"></script></body></html>"""
+        safe_class_name = re.sub(r"[^A-Za-z0-9._-]", "-", unicodedata.normalize("NFKD", klass["name"]).encode("ascii", "ignore").decode("ascii")) or "Klasse"
+        return document.encode("utf-8"), "text/html; charset=utf-8", None, [
+            ("Content-Disposition", f'inline; filename="ProjektKontor-Zugaenge-{safe_class_name}.html"'),
+        ]
 
     def list_all_users(self, environ, user):
         user = self.require_teacher(user)
