@@ -53,25 +53,52 @@ window.addEventListener('scroll',()=>{if(!navigationFrame)navigationFrame=reques
 window.addEventListener('resize',updateCurrentSection);
 updateCurrentSection();
 
+const productTabs=[...document.querySelectorAll('[data-product-view]')];
+const productViews=[...document.querySelectorAll('.product-view[data-view]')];
+const previewNavigation=[...document.querySelectorAll('.preview-sidebar span')];
+function showProductView(name){
+  productTabs.forEach((button,index)=>{
+    const active=button.dataset.productView===name;
+    button.classList.toggle('active',active);
+    button.setAttribute('aria-selected',String(active));
+    button.tabIndex=active?0:-1;
+    previewNavigation[index]?.classList.toggle('active',active);
+  });
+  productViews.forEach(view=>{
+    const active=view.dataset.view===name;
+    view.hidden=!active;
+    view.classList.toggle('active',active);
+  });
+}
+productTabs.forEach((button,index)=>{
+  button.addEventListener('click',()=>showProductView(button.dataset.productView));
+  button.addEventListener('keydown',event=>{
+    if(!['ArrowLeft','ArrowRight'].includes(event.key))return;
+    event.preventDefault();
+    const offset=event.key==='ArrowRight'?1:-1;
+    const next=productTabs[(index+offset+productTabs.length)%productTabs.length];
+    showProductView(next.dataset.productView);
+    next.focus();
+  });
+});
+
+if(!prefersReducedMotion.matches&&'IntersectionObserver' in window){
+  const revealItems=[...document.querySelectorAll('main>.section, .proof-strip')];
+  revealItems.forEach(item=>item.classList.add('reveal-item'));
+  const revealObserver=new IntersectionObserver(entries=>entries.forEach(entry=>{
+    if(entry.isIntersecting){entry.target.classList.add('is-visible');revealObserver.unobserve(entry.target)}
+  }),{rootMargin:'0px 0px -8% 0px',threshold:.08});
+  revealItems.forEach(item=>revealObserver.observe(item));
+}
+
 const contactForm=document.querySelector('#contact-form');
 const contactStatus=document.querySelector('#contact-status');
 const contactButton=contactForm.querySelector('button[type="submit"]');
 const turnstileContainer=document.querySelector('#turnstile-container');
 contactButton.disabled=true;
 
-const betaDialog=document.querySelector('#beta-dialog');
-const betaDialogClose=betaDialog?.querySelector('.beta-dialog-close');
-const betaDialogLater=betaDialog?.querySelector('.beta-dialog-later');
 const betaContactLinks=document.querySelectorAll('.beta-contact-link');
 const pilotQualification=document.querySelector('#pilot-qualification');
-const betaPopupKey='projektkontor-beta-popup-dismissed-v2';
-function rememberBetaPopup(){
-  try{sessionStorage.setItem(betaPopupKey,'true')}catch(error){}
-}
-function closeBetaDialog(){
-  if(betaDialog?.open)betaDialog.close();
-  rememberBetaPopup();
-}
 function setPilotQualification(active){
   if(!pilotQualification)return;
   pilotQualification.hidden=!active;
@@ -91,7 +118,6 @@ function openPreparedContact(subjectText,messageText,pilot=false){
 }
 function prepareBetaRequest(event){
   event.preventDefault();
-  closeBetaDialog();
   openPreparedContact('Vierwöchiger ProjektKontor-Pilot','Ich möchte ProjektKontor in einem konkreten Unterrichtsvorhaben vier Wochen lang erproben.',true);
 }
 betaContactLinks.forEach(link=>link.addEventListener('click',prepareBetaRequest));
@@ -99,29 +125,6 @@ document.querySelectorAll('.contact-prefill-link').forEach(link=>link.addEventLi
   event.preventDefault();
   openPreparedContact(link.dataset.subject||'Interesse an ProjektKontor',link.dataset.message||'Ich interessiere mich für ProjektKontor.',false);
 }));
-betaDialogClose?.addEventListener('click',closeBetaDialog);
-betaDialogLater?.addEventListener('click',closeBetaDialog);
-betaDialog?.addEventListener('cancel',rememberBetaPopup);
-betaDialog?.addEventListener('click',event=>{if(event.target===betaDialog)closeBetaDialog()});
-let betaPopupDismissed=false;
-try{betaPopupDismissed=sessionStorage.getItem(betaPopupKey)==='true'}catch(error){}
-if(betaDialog&&!betaPopupDismissed){
-  window.setTimeout(()=>{
-    if(!betaDialog.open){
-      const scrollPosition={left:window.scrollX,top:window.scrollY};
-      const root=document.documentElement;
-      const previousScrollBehavior=root.style.scrollBehavior;
-      betaDialog.showModal();
-      root.style.scrollBehavior='auto';
-      window.scrollTo(scrollPosition);
-      requestAnimationFrame(()=>{
-        window.scrollTo(scrollPosition);
-        root.style.scrollBehavior=previousScrollBehavior;
-      });
-    }
-  },15000);
-}
-
 async function prepareHumanCheck(){
   try{
     const response=await fetch('/api/contact/config',{headers:{Accept:'application/json'}});
