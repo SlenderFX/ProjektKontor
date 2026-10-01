@@ -3313,6 +3313,9 @@ class App:
             if key in data:
                 value={"name":name,"description":description,"expected_result":expected_result,"start_at":start_at,"end_at":end_at,"team_id":team_id}.get(key,data[key])
                 fields.append(f"{key}=?");params.append(int(bool(value)) if key=="locked" else value)
+        if "completed" in data:
+            fields.append("completed_at=?")
+            params.append((phase.get("completed_at") or utcnow()) if bool(data.get("completed")) else None)
         if fields: self.db.execute(f"UPDATE phases SET {','.join(fields)} WHERE id=?",tuple(params+[phase_id]))
         return {"ok":True}
 

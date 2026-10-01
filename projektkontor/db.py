@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS phases (
     end_at TEXT NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0,
     locked INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -562,6 +563,8 @@ class Database:
             phase_columns = {row[1] for row in connection.execute("PRAGMA table_info(phases)").fetchall()}
             if "team_id" not in phase_columns:
                 connection.execute("ALTER TABLE phases ADD COLUMN team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL")
+            if "completed_at" not in phase_columns:
+                connection.execute("ALTER TABLE phases ADD COLUMN completed_at TEXT")
             request_columns = {row[1] for row in connection.execute("PRAGMA table_info(license_requests)").fetchall()}
             if "organization" not in request_columns:
                 connection.execute("ALTER TABLE license_requests ADD COLUMN organization TEXT NOT NULL DEFAULT ''")
