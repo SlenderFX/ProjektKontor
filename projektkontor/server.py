@@ -98,6 +98,17 @@ def parse_datetime(value: Any, field: str) -> str:
         raise HttpError(400, f"{field} ist ungültig.") from exc
 
 
+def parse_optional_datetime(value: Any, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.date().isoformat() if len(text) == 10 else parsed.isoformat(timespec="minutes")
+    except ValueError as exc:
+        raise HttpError(400, f"{field} ist ungültig.") from exc
+
+
 def parse_project_date(value: Any, field: str, include_time: bool) -> str:
     text = str(value or "").strip()
     if not text:
@@ -3086,9 +3097,16 @@ class App:
                 source_start = datetime.fromisoformat(snapshot.get("source_start", start_at))
                 target_start = datetime.fromisoformat(start_at)
                 offset = target_start - source_start
+                date_offset = target_start.date() - source_start.date()
                 def shifted(value: str | None, fallback: str) -> str:
                     if not value:
                         return fallback
+                    return (datetime.fromisoformat(value) + offset).isoformat(timespec="minutes")
+                def shifted_optional(value: str | None) -> str:
+                    if not value:
+                        return ""
+                    if "T" not in value:
+                        return (date.fromisoformat(value) + date_offset).isoformat()
                     return (datetime.fromisoformat(value) + offset).isoformat(timespec="minutes")
                 for team in snapshot.get("teams", []):
                     team_cursor = connection.execute(
@@ -3098,10 +3116,10 @@ class App:
                     team_map[int(team["id"])] = int(team_cursor.lastrowid)
                 for phase in snapshot.get("phases", []):
                     phase_cursor = connection.execute(
-                        """INSERT INTO phases(project_id,name,description,expected_result,start_at,end_at,sort_order,locked,created_at)
-                           VALUES(?,?,?,?,?,?,?,0,?)""",
-                        (project_id, phase["name"], phase.get("description", ""), phase.get("expected_result", ""),
-                         shifted(phase.get("start_at"), start_at), shifted(phase.get("end_at"), end_at), phase.get("sort_order", 0), utcnow()),
+                        """INSERT INTO phases(project_id,team_id,name,description,expected_result,start_at,end_at,sort_order,locked,created_at)
+                           VALUES(?,?,?,?,?,?,?,?,0,?)""",
+                        (project_id, team_map.get(phase.get("team_id")), phase["name"], phase.get("description", ""), phase.get("expected_result", ""),
+                         shifted_optional(phase.get("start_at")), shifted_optional(phase.get("end_at")), phase.get("sort_order", 0), utcnow()),
                     )
                     phase_map[int(phase["id"])] = int(phase_cursor.lastrowid)
                 for task in snapshot.get("tasks", []):
@@ -3139,7 +3157,12 @@ class App:
         result["teams"] = self.db.all("""SELECT t.*, (SELECT COUNT(*) FROM team_members tm WHERE tm.team_id=t.id) member_count FROM teams t WHERE t.project_id=? ORDER BY t.status,name""",(project_id,))
         for team in result["teams"]:
             team["members"] = self.db.all("""SELECT u.id,u.first_name,u.username,tm.is_lead,tm.business_role FROM team_members tm JOIN users u ON u.id=tm.user_id WHERE tm.team_id=? AND u.active=1 ORDER BY tm.is_lead DESC,u.first_name""",(team["id"],))
-        result["phases"] = self.db.all("SELECT * FROM phases WHERE project_id=? ORDER BY sort_order,id",(project_id,))
+        result["phases"] = self.db.all(
+            """SELECT ph.*,t.name team_name,t.color team_color
+                 FROM phases ph LEFT JOIN teams t ON t.id=ph.team_id
+                WHERE ph.project_id=? ORDER BY ph.sort_order,ph.id""",
+            (project_id,),
+        )
         result["statuses"] = self.db.all("SELECT * FROM task_statuses WHERE project_id=? AND active=1 ORDER BY sort_order",(project_id,))
         visible_team_ids = [row["team_id"] for row in self.db.all("SELECT team_id FROM team_members WHERE user_id=? AND team_id IN (SELECT id FROM teams WHERE project_id=? AND status!='rejected')", (user["id"], project_id))]
         if result["can_manage"]:
@@ -3243,10 +3266,15 @@ class App:
         name=str(data.get("name","")).strip();description=str(data.get("description",""));expected_result=str(data.get("expected_result",""))
         if not name or len(name)>120: raise HttpError(400,"Der Phasenname muss 1 bis 120 Zeichen lang sein.")
         if len(description)>20_000 or len(expected_result)>20_000: raise HttpError(400,"Beschreibung und erwartetes Ergebnis dürfen jeweils höchstens 20.000 Zeichen enthalten.")
-        start_at=parse_datetime(data.get("start_at"),"Start");end_at=parse_datetime(data.get("end_at"),"Ende")
-        if datetime.fromisoformat(end_at)<datetime.fromisoformat(start_at): raise HttpError(400,"Das Phasenende darf nicht vor dem Phasenstart liegen.")
+        start_at=parse_optional_datetime(data.get("start_at"),"Start")
+        end_at=parse_optional_datetime(data.get("end_at"),"Ende")
+        if start_at and end_at and datetime.fromisoformat(end_at)<datetime.fromisoformat(start_at): raise HttpError(400,"Das Phasenende darf nicht vor dem Phasenstart liegen.")
+        try: team_id=int(data.get("team_id") or 0) or None
+        except (TypeError,ValueError): raise HttpError(400,"Die ausgewählte Arbeitsgruppe ist ungültig.")
+        if team_id and not self.db.one("SELECT 1 ok FROM teams WHERE id=? AND project_id=? AND status='active'",(team_id,project_id)):
+            raise HttpError(400,"Die ausgewählte Arbeitsgruppe gehört nicht zu diesem Projekt.")
         next_order=self.db.one("SELECT COALESCE(MAX(sort_order),-1)+1 value FROM phases WHERE project_id=?",(project_id,))["value"]
-        phase_id=self.db.execute("""INSERT INTO phases(project_id,name,description,expected_result,start_at,end_at,sort_order,locked,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",(project_id,name,description,expected_result,start_at,end_at,int(data.get("sort_order",next_order)),int(bool(data.get("locked"))),utcnow()))
+        phase_id=self.db.execute("""INSERT INTO phases(project_id,team_id,name,description,expected_result,start_at,end_at,sort_order,locked,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",(project_id,team_id,name,description,expected_result,start_at,end_at,int(data.get("sort_order",next_order)),int(bool(data.get("locked"))),utcnow()))
         return {"id":phase_id}
 
     def reorder_phases(self,environ,user,project_id):
@@ -3270,12 +3298,20 @@ class App:
         name=str(data.get("name",phase["name"])).strip();description=str(data.get("description",phase["description"]));expected_result=str(data.get("expected_result",phase["expected_result"]))
         if not name or len(name)>120: raise HttpError(400,"Der Phasenname muss 1 bis 120 Zeichen lang sein.")
         if len(description)>20_000 or len(expected_result)>20_000: raise HttpError(400,"Beschreibung und erwartetes Ergebnis dürfen jeweils höchstens 20.000 Zeichen enthalten.")
-        start_at=parse_datetime(data.get("start_at",phase["start_at"]),"Start");end_at=parse_datetime(data.get("end_at",phase["end_at"]),"Ende")
-        if datetime.fromisoformat(end_at)<datetime.fromisoformat(start_at): raise HttpError(400,"Das Phasenende darf nicht vor dem Phasenstart liegen.")
+        raw_start=data.get("start_at",phase["start_at"]);raw_end=data.get("end_at",phase["end_at"])
+        start_at=parse_optional_datetime(raw_start,"Start")
+        end_at=parse_optional_datetime(raw_end,"Ende")
+        if start_at and end_at and datetime.fromisoformat(end_at)<datetime.fromisoformat(start_at): raise HttpError(400,"Das Phasenende darf nicht vor dem Phasenstart liegen.")
+        if "team_id" in data:
+            try: team_id=int(data.get("team_id") or 0) or None
+            except (TypeError,ValueError): raise HttpError(400,"Die ausgewählte Arbeitsgruppe ist ungültig.")
+            if team_id and not self.db.one("SELECT 1 ok FROM teams WHERE id=? AND project_id=? AND status='active'",(team_id,phase["project_id"])):
+                raise HttpError(400,"Die ausgewählte Arbeitsgruppe gehört nicht zu diesem Projekt.")
+        else: team_id=phase.get("team_id")
         fields=[];params=[]
-        for key in ("name","description","expected_result","start_at","end_at","sort_order","locked"):
+        for key in ("name","description","expected_result","start_at","end_at","team_id","sort_order","locked"):
             if key in data:
-                value={"name":name,"description":description,"expected_result":expected_result,"start_at":start_at,"end_at":end_at}.get(key,data[key])
+                value={"name":name,"description":description,"expected_result":expected_result,"start_at":start_at,"end_at":end_at,"team_id":team_id}.get(key,data[key])
                 fields.append(f"{key}=?");params.append(int(bool(value)) if key=="locked" else value)
         if fields: self.db.execute(f"UPDATE phases SET {','.join(fields)} WHERE id=?",tuple(params+[phase_id]))
         return {"ok":True}
@@ -3793,7 +3829,7 @@ class App:
             "has_start": project.get("has_start", 1), "has_end": project.get("has_end", 1),
             "start_has_time": project.get("start_has_time", 1), "end_has_time": project.get("end_has_time", 1),
             "teams": self.db.all("SELECT id,name,responsibility,color FROM teams WHERE project_id=? AND status='active' ORDER BY name", (project_id,)),
-            "phases": self.db.all("SELECT id,name,description,expected_result,start_at,end_at,sort_order FROM phases WHERE project_id=? ORDER BY sort_order",(project_id,)),
+            "phases": self.db.all("SELECT id,team_id,name,description,expected_result,start_at,end_at,sort_order FROM phases WHERE project_id=? ORDER BY sort_order",(project_id,)),
             "tasks": self.db.all("SELECT title,description,weight,phase_id,team_id,start_at,due_at,requires_final_approval,is_milestone FROM tasks WHERE project_id=? AND parent_id IS NULL AND is_shared_parent=0",(project_id,))
         }
         try:tid=self.db.execute("INSERT INTO templates(name,source_project_id,snapshot_json,created_by,created_at) VALUES(?,?,?,?,?)",(name,project_id,json.dumps(snapshot,ensure_ascii=False),user["id"],utcnow()))

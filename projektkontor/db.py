@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS team_members (
 CREATE TABLE IF NOT EXISTS phases (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     expected_result TEXT NOT NULL DEFAULT '',
@@ -558,6 +559,9 @@ class Database:
                     "INSERT INTO schema_migrations(version,applied_at) VALUES(5,?)",
                     (utcnow(),),
                 )
+            phase_columns = {row[1] for row in connection.execute("PRAGMA table_info(phases)").fetchall()}
+            if "team_id" not in phase_columns:
+                connection.execute("ALTER TABLE phases ADD COLUMN team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL")
             request_columns = {row[1] for row in connection.execute("PRAGMA table_info(license_requests)").fetchall()}
             if "organization" not in request_columns:
                 connection.execute("ALTER TABLE license_requests ADD COLUMN organization TEXT NOT NULL DEFAULT ''")

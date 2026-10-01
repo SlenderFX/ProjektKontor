@@ -162,6 +162,13 @@ class AppFlowTest(unittest.TestCase):
         })
         self.assertEqual(status, 400)
         self.assertIn("alle Projektphasen", invalid_order["error"])
+        status, undated_phase, _ = self.client.request("POST", f"/api/projects/{project_id}/phases", {
+            "name": "Auswertung", "description": "Termin wird später festgelegt",
+        })
+        self.assertEqual(status, 200)
+        saved_undated_phase = self.app.db.one("SELECT * FROM phases WHERE id=?", (undated_phase["id"],))
+        self.assertEqual(saved_undated_phase["start_at"], "")
+        self.assertEqual(saved_undated_phase["end_at"], "")
 
         _, later_import, _ = self.client.request("POST", f"/api/classes/{class_id}/import", {
             "rows": [{"first_name": "Nora"}]
@@ -181,6 +188,14 @@ class AppFlowTest(unittest.TestCase):
         team_id = team["id"]
         stored_member = self.app.db.one("SELECT is_lead FROM team_members WHERE team_id=? AND user_id=?", (team_id, lead_id))
         self.assertEqual(stored_member["is_lead"], 1)
+        status, _, _ = self.client.request("PATCH", f"/api/phases/{undated_phase['id']}", {
+            "team_id": team_id, "start_at": "2026-07-22", "end_at": "",
+        })
+        self.assertEqual(status, 200)
+        assigned_phase = self.app.db.one("SELECT team_id,start_at,end_at FROM phases WHERE id=?", (undated_phase["id"],))
+        self.assertEqual(assigned_phase["team_id"], team_id)
+        self.assertEqual(assigned_phase["start_at"], "2026-07-22")
+        self.assertEqual(assigned_phase["end_at"], "")
 
         status, second_team, _ = self.client.request("POST", f"/api/projects/{project_id}/teams", {
             "name": "Vertrieb", "responsibility": "Kundschaft", "color": "#16A34A",
@@ -213,6 +228,9 @@ class AppFlowTest(unittest.TestCase):
 
         status, detail, _ = self.client.request("GET", f"/api/projects/{project_id}")
         self.assertEqual(status, 200)
+        detail_phase = next(item for item in detail["phases"] if item["id"] == undated_phase["id"])
+        self.assertEqual(detail_phase["team_id"], team_id)
+        self.assertEqual(detail_phase["team_name"], "Marketing")
         self.assertEqual(detail["tasks"][0]["assignees"][0]["first_name"], "Lena")
         self.assertEqual(detail["tasks"][0]["due_at"], "2026-07-16T11:30")
         self.assertEqual(detail["progress"]["overall"], 0)
@@ -248,6 +266,10 @@ class AppFlowTest(unittest.TestCase):
         self.assertIsNotNone(copied_marketing)
         self.assertEqual(copied_marketing["responsibility"], "Kommunikation")
         self.assertEqual(copied_marketing["color"], "#2563EB")
+        copied_phase = self.app.db.one("SELECT team_id,start_at,end_at FROM phases WHERE project_id=? AND name='Auswertung'", (copied["id"],))
+        self.assertEqual(copied_phase["team_id"], copied_marketing["id"])
+        self.assertEqual(copied_phase["start_at"], "2026-08-07")
+        self.assertEqual(copied_phase["end_at"], "")
         self.assertEqual(self.app.db.one("SELECT COUNT(*) count FROM team_members WHERE team_id=?", (copied_marketing["id"],))["count"], 0)
         self.assertIsNotNone(self.app.db.one("SELECT id FROM teams WHERE project_id=? AND name='Vertrieb'", (copied["id"],)))
         self.assertIsNotNone(self.app.db.one("SELECT id FROM tasks WHERE project_id=? AND title='Flyer abstimmen'", (copied["id"],)))
@@ -1681,6 +1703,13 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn(b'href="#/projects/${id}/${key}"', app_script)
         self.assertIn(b'id="add-user-from-overview"', app_script)
         self.assertIn(b"chooseManualAccountClassDialog", app_script)
+        self.assertIn(b"Arbeitsgruppen &amp; Abteilungen", app_script)
+        self.assertIn(b'id="add-team-overview"', app_script)
+        self.assertIn(b'name="team_id"', app_script)
+        self.assertIn(b"Zeitraum (optional)", app_script)
+        self.assertIn(b"Dauer ab Start", app_script)
+        self.assertIn(b'data-phase-today="start"', app_script)
+        self.assertIn(b"phase-duration-badge", app_script)
         self.assertIn(b'href="#/admin/licenses">Bestellungen &amp; Lizenzen</a>', app_script)
         self.assertIn(b"async function renderLicenses(options={})", app_script)
         self.assertIn(b"Zahlungsziel verpasst", app_script)
