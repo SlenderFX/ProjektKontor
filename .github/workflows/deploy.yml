@@ -39,7 +39,7 @@ jobs:
           # laufenden Containers aus compose.yaml, sonst /opt/<repo-name>.
           dir="$DEPLOY_PATH"
           if [ -z "$dir" ]; then
-            for name in $(grep -hoE '^\s*container_name:\s*\S+' compose.y*ml docker-compose.y*ml 2>/dev/null | awk '{print $2}' | tr -d '"'"'"'); do
+            for name in $(grep -hoE '^\s*container_name:\s*\S+' compose.y*ml docker-compose.y*ml 2>/dev/null | awk '{print $2}' | tr -d "\"'"); do
               dir=$(ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" \
                 "docker inspect $name --format '{{ index .Config.Labels \"com.docker.compose.project.working_dir\" }}' 2>/dev/null" || true)
               [ -n "$dir" ] && break
